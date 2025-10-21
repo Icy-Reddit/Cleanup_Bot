@@ -1,0 +1,35 @@
+# =============================================================
+# Titlematch & Cleanup Bot – unified configuration file
+# =============================================================
+
+decision:
+  title_threshold_auto: 93           # ≥93 = auto certain
+  title_threshold_border: 85         # 85–92 = borderline → mod queue
+  poster_thresholds:                 # poster matcher off, but kept for compatibility
+    certain: 8
+    unsure: 12
+  text_short_title_min_tokens: 3     # short titles handled cautiously
+  time_window_days: 14               # compare with posts newer than 14 days
+
+phrases:
+  allow_repost_hints:
+    - "link dead"
+    - "links expired"
+    - "repost"
+    - "again"
+    - "previous request"
+
+comments:
+  repeated_request_template: >
+    This link was already requested, you may have overlooked it. Please scroll in link requests or try keywords or title in the search bar. You may get lucky and it’s already found — or you click follow when you find the earlier post and we’re all fine.
+    How to Use the Search Bar in Our Subreddit:
+    https://www.reddit.com/r/CShortDramas/comments/1ig6a8j/how_to_use_the_search_bar_in_our_subreddit/
+
+  missing_title_template: >
+    Your post has been removed because it doesn't include the drama name or a short description in the header. This is required to keep the subreddit organized and help others find and fulfill similar requests.
+    If the name is visible on the poster, just add it to the header.
+    If there’s no name, please add a short description instead. Think of what caught your attention, add the genre, storyline, actor’s name, or a brief summary of what you saw in the ad.
+    Why do we ask this? Because search terms like “link” or “Do you know the title?” aren’t helpful for others looking for the same drama.
+
+poster:
+  default_mode: never   # Poster Matcher is disabled, but config kept for compatibility

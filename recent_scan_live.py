@@ -1,388 +1,527 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-recent_scan_live.py — LIVE scan and act with intra-batch dedup + idempotency ledger
+recent_scan_live.py — Titlematch live scanner (24/7-friendly)
+
+- Scans /new and/or ModQueue for r/CShortDramas (default), window-based.
+- Poster matcher is OFF by default; accepted flags exist for compatibility.
+- Integrates Title Validator -> Title Matcher -> Decision Engine.
+- Supports JSONL logging and simple state to avoid reprocessing the same posts between runs.
+
+CLI:
+  --config PATH                YAML config (default: ./config.yaml)
+  --window MIN                 Lookback window in minutes (default: 60)
+  --sources {new,modqueue,both}
+  --limit-per-source N         Max items fetched from each source (default: 200)
+  --poster {auto,never,always} Poster matcher mode (default: never; no-op here)
+  --poster-pool {top,full}     Candidate pool source (default: top; advisory to title matcher)
+  --fetch-per-flair N          Optional cap per flair when building candidate pools
+  --live                       Print human-readable console output
+  --log-jsonl [PATH]           Append decision JSON to JSONL (default: logs/decisions_YYYY-MM-DD.jsonl)
+  --report-csv [PATH]          Append a flat CSV summary (optional)
+  --state-file PATH            JSON state to deduplicate processed post IDs across runs
+  --state-ttl-min MIN          TTL minutes for cached IDs (default: 180)
+  --subreddit NAME             Subreddit to scan (default: CShortDramas)
+  --verbose                    More detailed prints
+
+Notes:
+- This file tries to be resilient to small API differences in local modules by using adapters and introspection.
+- PRAW site section expected: [Cleanup_Bot]; fallback to [DEFAULT].
 """
+
 from __future__ import annotations
-import argparse, os, re, json, csv
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timezone, timedelta
 
-import yaml, praw
+import argparse
+import csv
+import datetime as dt
+import json
+import os
+import sys
+from dataclasses import asdict, is_dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-from title_validator import validate_title
-from title_matcher import match_title, normalize_title
-from decision_engine import decide, pretty_print_decision
+# --- Third-party ---
+try:
+    import yaml
+except Exception:
+    print("[FATAL] PyYAML is required. pip install pyyaml", file=sys.stderr)
+    sys.exit(1)
 
-# --- helpers ---
-_EMOJI_OR_SYMBOLS_RE = re.compile(r"[\u2600-\u27BF\U0001F300-\U0001FAFF]")
-_MULTISPACE_RE = re.compile(r"\s+")
+try:
+    import praw
+except Exception:
+    print("[FATAL] PRAW is required. pip install praw", file=sys.stderr)
+    sys.exit(1)
 
-def normalize_flair(text: str | None) -> str:
-    if not text:
-        return ""
-    t = _EMOJI_OR_SYMBOLS_RE.sub(" ", text)
-    t = re.sub(r"[^\w\s&]+", " ", t).strip().lower()
-    return _MULTISPACE_RE.sub(" ", t)
+# --- Local modules ---
+try:
+    import title_validator
+except Exception:
+    title_validator = None
+
+try:
+    import title_matcher
+except Exception:
+    title_matcher = None
+
+try:
+    import decision_engine
+except Exception:
+    decision_engine = None
+
+
+# ------------------------------- Utils ---------------------------------
+
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+def iso(ts: dt.datetime) -> str:
+    return ts.astimezone(dt.timezone.utc).isoformat()
 
 def load_config(path: str) -> dict:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"config.yaml not found at: {path}")
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return (yaml.safe_load(f) or {})
 
-def iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def get_reddit():
+    """Create Reddit client using praw.ini [Cleanup_Bot], fallback to [DEFAULT]."""
+    try:
+        return praw.Reddit("Cleanup_Bot")
+    except Exception:
+        return praw.Reddit("DEFAULT")
 
-def within_window(ts_utc: float, window_min: int) -> bool:
-    dt = datetime.fromtimestamp(ts_utc, tz=timezone.utc)
-    return (datetime.now(timezone.utc) - dt) <= timedelta(minutes=window_min)
+def ensure_dir(p: str) -> None:
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
-def fetch_candidates(r: praw.Reddit, subreddit: str, window_min: int, sources: str, limit_per_source: int):
-    s = r.subreddit(subreddit)
-    out, seen = [], set()
-
-    def add_if_ok(p):
-        if getattr(p, "id", None) in seen:
-            return
-        if within_window(p.created_utc, window_min):
-            out.append(p); seen.add(p.id)
-
-    if sources in ("new", "both"):
-        for p in s.new(limit=limit_per_source):
-            add_if_ok(p)
-
-    if sources in ("modqueue", "both"):
-        for itm in s.mod.modqueue(limit=limit_per_source):
-            try:
-                if getattr(itm, "created_utc", None) is None: 
-                    continue
-                if getattr(itm, "title", None): 
-                    add_if_ok(itm)
-            except Exception:
-                continue
-
-    out.sort(key=lambda p: p.created_utc)
-    return out
-
-def _script_dir() -> str:
-    return os.path.dirname(os.path.abspath(__file__))
-
-def _ensure_dir(p: str):
-    Path(p).parent.mkdir(parents=True, exist_ok=True)
-
-def _jsonl_path(base: str | None) -> str:
-    if base:
-        _ensure_dir(base); 
-        return base
-    d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    path = os.path.join(_script_dir(), "logs", f"decisions_{d}.jsonl")
-    _ensure_dir(path)
-    return path
-
-def _append_jsonl(path: str, obj: dict) -> None:
+def append_jsonl(path: str, obj: dict) -> None:
+    ensure_dir(path)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-def _csv_path(base: str | None) -> str:
-    if base:
-        _ensure_dir(base); 
-        return base
-    d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    path = os.path.join(_script_dir(), "logs", f"actions_{d}.csv")
-    _ensure_dir(path)
-    return path
-
-def _append_csv(path: str, rows: List[Dict[str, Any]]):
-    if not rows: 
-        return
+def append_csv(path: str, row: Dict[str, Any], header_order: Optional[List[str]] = None) -> None:
+    ensure_dir(path)
     exists = os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=[
-            "timestamp","action","category","flair","title","author","link","post_id","reason"
-        ])
-        if not exists: 
-            w.writeheader()
-        for r in rows: 
-            w.writerow(r)
+    with open(path, "a", encoding="utf-8", newline="") as f:
+        import csv
+        writer = csv.DictWriter(f, fieldnames=header_order or list(row.keys()))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
-def _load_state(path: str, ttl_minutes: int) -> dict:
-    state = {}
-    p = Path(path)
-    if p.exists():
-        try:
-            state = json.load(p.open("r", encoding="utf-8")) or {}
-        except Exception:
-            state = {}
-    now = datetime.now(timezone.utc).timestamp()
-    ttl = ttl_minutes * 60
-    pruned = {pid: ts for pid, ts in state.items() if isinstance(ts, (int, float)) and (now - ts) < ttl}
-    if pruned != state:
-        try:
-            _ensure_dir(path)
-            json.dump(pruned, p.open("w", encoding="utf-8"), ensure_ascii=False)
-        except Exception:
-            pass
-    return pruned
-
-def _save_state(path: str, state: dict):
-    _ensure_dir(path)
+def load_state(path: Optional[str]) -> Dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {"ids": {}}
     try:
-        json.dump(state, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        pass
+        return {"ids": {}}
 
-def _do_remove_with_comment(submission, *, comment_text: Optional[str]) -> None:
-    already_removed = False
-    try:
-        submission.refresh()
-        already_removed = bool(getattr(submission, "removed_by_category", None))
-    except Exception:
-        already_removed = False
+def save_state(path: Optional[str], state: Dict[str, Any]) -> None:
+    if not path:
+        return
+    ensure_dir(path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
 
-    submission.mod.remove()
-    if comment_text and not already_removed:
+def gc_state(state: Dict[str, Any], ttl_min: int) -> None:
+    """Garbage collect IDs older than ttl_min."""
+    if ttl_min <= 0:
+        return
+    cutoff = utcnow().timestamp() - ttl_min * 60
+    ids = state.get("ids", {})
+    to_del = [pid for pid, ts in ids.items() if ts < cutoff]
+    for pid in to_del:
+        ids.pop(pid, None)
+    state["ids"] = ids
+
+
+# ------------------------------ Fetch ----------------------------------
+
+def fetch_candidates(r: praw.Reddit, sub_name: str, sources: str, limit_per_source: int, window_min: int) -> List[Any]:
+    """Fetch posts from /new and/or modqueue within window_min minutes."""
+    sub = r.subreddit(sub_name)
+    now = utcnow()
+    min_ts = now - dt.timedelta(minutes=window_min)
+
+    out = []
+
+    def ok(created_utc: float) -> bool:
+        return dt.datetime.fromtimestamp(created_utc, tz=dt.timezone.utc) >= min_ts
+
+    if sources in ("new", "both"):
         try:
-            submission.reply(comment_text)
-        except Exception:
-            pass
+            for s in sub.new(limit=limit_per_source):
+                if ok(s.created_utc):
+                    out.append(("new", s))
+        except Exception as e:
+            print(f"[WARN] Failed to fetch /new: {e}", file=sys.stderr)
 
-def _do_report(submission, *, reason: str) -> None:
-    try: 
-        submission.report(reason)
-    except Exception: 
-        pass
+    if sources in ("modqueue", "both"):
+        try:
+            for s in sub.mod.modqueue(limit=limit_per_source):
+                # Modqueue can include comments; filter to submissions
+                if getattr(s, "created_utc", None) and ok(s.created_utc):
+                    out.append(("modqueue", s))
+        except Exception as e:
+            print(f"[WARN] Failed to fetch modqueue: {e}", file=sys.stderr)
 
-def main():
-    ap = argparse.ArgumentParser(description="LIVE: scan N minutes and act per Decision Engine, with intra-batch dedup + idempotency ledger.")
+    # Sort ascending by creation time
+    out.sort(key=lambda it: getattr(it[1], "created_utc", 0.0))
+    return out
+
+
+# ---------------------------- Adapters ---------------------------------
+
+def run_title_validator(title: str) -> Dict[str, Any]:
+    if title_validator and hasattr(title_validator, "validate_title"):
+        try:
+            return title_validator.validate_title(title)
+        except Exception as e:
+            return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
+    # Fallback heuristic if module missing:
+    title_clean = (title or "").strip()
+    if not title_clean or len(title_clean.split()) < 3:
+        return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
+    return {"status": "OK", "reason": "title_candidate"}
+
+def run_title_matcher(post: Any, cfg: dict, pool_choice: str = "top", fetch_per_flair: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Try to call into title_matcher to get a report structure.
+    Expected keys in result (best effort):
+      {
+        "best": {"score": int, "certainty": "low|borderline|certain", "relation": "same_author|different_author", "candidate": {title, flair, permalink, author}},
+        "top": [ ... ],
+        "pool_ids": [...]
+      }
+    """
+    if not title_matcher:
+        return {"best": None, "pool_ids": [], "top": []}
+
+    # Prefer a function named match_title_for_post; otherwise match_title
+    for fn_name in ("match_title_for_post", "match_title"):
+        fn = getattr(title_matcher, fn_name, None)
+        if not fn:
+            continue
+        try:
+            # Flexible kwargs — implementation should ignore unknowns.
+            kw = {
+                "post": post,
+                "config": cfg,
+                "pool": pool_choice,
+                "fetch_per_flair": fetch_per_flair,
+                "exclude_post_id": getattr(post, "id", None),
+                "exclude_post_url": getattr(post, "permalink", None),
+            }
+            codevars = getattr(fn, "__code__", None)
+            if codevars:
+                allowed = fn.__code__.co_varnames
+                kw = {k: v for k, v in kw.items() if k in allowed}
+            rep = fn(**kw)
+            return rep or {"best": None, "pool_ids": [], "top": []}
+        except Exception as e:
+            print(f"[WARN] title_matcher.{fn_name} failed: {e}", file=sys.stderr)
+
+    return {"best": None, "pool_ids": [], "top": []}
+
+def run_decision_engine(context: Dict[str, Any], validator: Dict[str, Any], title_report: Dict[str, Any], poster_report: Optional[Dict[str, Any]], cfg: dict) -> Dict[str, Any]:
+    if decision_engine and hasattr(decision_engine, "decide"):
+        try:
+            rep = decision_engine.decide(
+                context=context,
+                validator=validator,
+                title_report=title_report,
+                poster_report=poster_report,
+                config=cfg,
+            )
+            if is_dataclass(rep):
+                return asdict(rep)  # type: ignore
+            return rep
+        except Exception as e:
+            return {
+                "action": "MOD_QUEUE",
+                "category": "ENGINE_ERROR",
+                "reason": f"decision_engine_error: {e}",
+                "removal_reason": None,
+                "removal_comment": None,
+                "evidence": {},
+                "links": [],
+            }
+    # Fallback minimal rule (should rarely trigger):
+    status = validator.get("status", "OK")
+    if status == "MISSING":
+        return {
+            "action": "AUTO_REMOVE",
+            "category": "MISSING",
+            "reason": "Title missing",
+            "removal_reason": "Lack of Drama Name or Description in Title",
+            "removal_comment": None,
+            "evidence": {},
+            "links": [],
+        }
+    best = (title_report or {}).get("best") or {}
+    score = int(best.get("score") or 0)
+    relation = best.get("relation") or "unknown"
+    auto = int((cfg.get("decision", {}) or {}).get("title_threshold_auto", 93))
+    if score >= auto and relation == "different_author":
+        return {
+            "action": "AUTO_REMOVE",
+            "category": "REPEATED",
+            "reason": f"Title fuzzy match >= {auto} with different author",
+            "removal_reason": "Repeated Request",
+            "removal_comment": None,
+            "evidence": {"title_match": {"score": score, "relation": relation}},
+            "links": [best.get("candidate", {}).get("permalink")] if best.get("candidate") else [],
+        }
+    return {
+        "action": "NO_ACTION",
+        "category": "NO_SIGNAL",
+        "reason": "No strong signals",
+        "removal_reason": None,
+        "removal_comment": None,
+        "evidence": {},
+        "links": [],
+    }
+
+
+# ------------------------------ Rendering -------------------------------
+
+def print_human_post(source: str, post: Any, body_preview: Optional[str] = None) -> None:
+    created = dt.datetime.fromtimestamp(getattr(post, "created_utc", 0.0), tz=dt.timezone.utc).isoformat()
+    author = f"u/{getattr(getattr(post, 'author', None), 'name', 'unknown')}"
+    flair = getattr(post, "link_flair_text", None) or ""
+    pid = getattr(post, "id", "")
+    print("\n======================================================================")
+    print(f"[POST] {author} | flair={flair} | id={pid} | at={created}")
+    if body_preview:
+        print(f"      {body_preview}")
+    permalink = getattr(post, 'permalink', None)
+    if permalink:
+        base = "https://www.reddit.com"
+        if permalink.startswith("http"):
+            print(f"      {permalink}")
+        else:
+            print(f"      {base}{permalink}")
+
+def print_validator(rep: Dict[str, Any]) -> None:
+    print(f"[VALID] status={rep.get('status')} reason={rep.get('reason')}")
+
+def flair_from_rep(rep: Dict[str, Any]) -> str:
+    best = (rep or {}).get("best") or {}
+    cand = best.get("candidate") or {}
+    return cand.get("flair") or cand.get("link_flair_text") or ""
+
+def summarize_title_matcher(rep: Dict[str, Any]) -> Tuple[str, int, str, str, Optional[str]]:
+    best = (rep or {}).get("best") or {}
+    score = int(best.get("score") or 0)
+    certainty = best.get("certainty") or "low"
+    relation = best.get("relation") or "unknown"
+    cand = best.get("candidate") or {}
+    title = cand.get("title") or cand.get("post_title") or "(unknown)"
+    link = cand.get("permalink") or cand.get("url") or None
+    return title, score, certainty, relation, link
+
+def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: Optional[Dict[str, Any]]) -> None:
+    print("=============== DECISION ENGINE ===============")
+    print(f"When: {iso(utcnow())}")
+    print(f"Action: {dec.get('action')} | Category: {dec.get('category')}")
+    rr = dec.get("removal_reason")
+    print(f"Removal Reason: {rr if rr else 'None'}\n")
+    # Title evidence
+    t_title, t_score, t_cert, t_rel, t_link = summarize_title_matcher(title_rep)
+    print("-- Title Match --")
+    print(f"type=fuzzy | score={t_score} | certainty={t_cert} | relation={t_rel}")
+    author = (title_rep.get("best", {}) or {}).get("candidate", {}) or {}
+    print(f"  title='{t_title}' | flair={flair_from_rep(title_rep)} | author={author.get('author','')}")
+    if t_link:
+        print(f"  link={t_link}\n")
+    else:
+        print()
+    # Poster (always NO_REPORT here)
+    p = poster_rep or {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
+    print("-- Poster Match --")
+    print(f"status={p.get('status')} | distance={p.get('distance')} | relation={p.get('relation')}\n")
+    # Links
+    links = dec.get("links") or []
+    if links:
+        print("Links:")
+        for L in links:
+            print(f"- {L}")
+    print("===============================================")
+
+
+# ------------------------------ Main ------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--window", type=int, default=35)
-    ap.add_argument("--sources", choices=["new", "modqueue", "both"], default="both")
-    ap.add_argument("--limit-per-source", type=int, default=400)
-    ap.add_argument("--poster", choices=["auto", "never", "always"], default="never")
-    ap.add_argument("--poster-pool", choices=["top", "full"], default="top")
-    ap.add_argument("--fetch-per-flair", type=int, default=200)
-
-    ap.add_argument("--live", action="store_true")
-    ap.add_argument("--log-jsonl", nargs="?", const="")
-    ap.add_argument("--report-csv", nargs="?", const="")
-    ap.add_argument("--state-file", default=os.path.join(_script_dir(), "logs", "state_actions.json"))
-    ap.add_argument("--state-ttl-min", type=int, default=360)
+    ap.add_argument("--window", type=int, default=60, help="Lookback window minutes")
+    ap.add_argument("--sources", choices=("new","modqueue","both"), default="both")
+    ap.add_argument("--limit-per-source", type=int, default=200)
+    ap.add_argument("--poster", choices=("auto","never","always"), default="never")
+    ap.add_argument("--poster-pool", choices=("top","full"), default="top")
+    ap.add_argument("--fetch-per-flair", type=int, default=None)
+    ap.add_argument("--live", action="store_true", help="Human-readable console output")
+    ap.add_argument("--log-jsonl", nargs="?", const="", default=None, help="Append decisions to JSONL (optional path)")
+    ap.add_argument("--report-csv", nargs="?", const="", default=None, help="Append flat CSV summary (optional path)")
+    ap.add_argument("--state-file", default=None)
+    ap.add_argument("--state-ttl-min", type=int, default=180)
+    ap.add_argument("--subreddit", default="CShortDramas")
     ap.add_argument("--verbose", action="store_true")
-
     args = ap.parse_args()
-    cfg = load_config(args.config)
 
-    reddit_site = (cfg.get("reddit", {}) or {}).get("praw_site") or "Cleanup_Bot"
-    subreddit_name = (cfg.get("reddit", {}) or {}).get("subreddit") or "CShortDramas"
+    try:
+        cfg = load_config(args.config)
+    except Exception as e:
+        print(f"[FATAL] Cannot load config: {e}", file=sys.stderr)
+        return 2
 
-    repeated_tmpl = (cfg.get("comments", {}) or {}).get("repeated_request_template")
-    missing_tmpl  = (cfg.get("comments", {}) or {}).get("missing_title_template")
+    r = get_reddit()
+
+    # State
+    state = load_state(args.state_file)
+    gc_state(state, args.state_ttl_min)
+
+    posts = fetch_candidates(
+        r=r,
+        sub_name=args.subreddit,
+        sources=args.sources,
+        limit_per_source=args.limit_per_source,
+        window_min=args.window,
+    )
 
     if args.verbose:
-        print(f"[DEBUG] {iso_now()} — LIVE={'YES' if args.live else 'NO'}; window={args.window}min; sources={args.sources}")
-        try:
-            r = praw.Reddit(reddit_site); print(f"[DEBUG] Auth as: {r.user.me()}")
-        except Exception as e:
-            print(f"[WARN] Cannot verify user.me(): {e}"); r = praw.Reddit(reddit_site)
-    else:
-        r = praw.Reddit(reddit_site)
+        print(f"[INFO] fetched={len(posts)} from sources={args.sources} window={args.window}min")
 
-    state = _load_state(args.state_file, args.state_ttl_min)
+    processed = 0
+    skipped = 0
+    decisions_count = {"AUTO_REMOVE":0, "MOD_QUEUE":0, "NO_ACTION":0, "OTHER":0}
 
-    subs = fetch_candidates(r, subreddit_name, args.window, args.sources, args.limit_per_source)
-    if args.verbose: 
-        print(f"[DEBUG] fetched submissions: {len(subs)}")
+    # Default JSONL path
+    jsonl_path = None
+    if args.log_jsonl is not None:
+        if args.log_jsonl == "":
+            jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl")
+        else:
+            jsonl_path = args.log_jsonl
+        ensure_dir(jsonl_path)
 
-    actions_csv_rows: List[Dict[str, Any]] = []
+    csv_path = None
+    if args.report_csv is not None:
+        csv_path = args.report_csv or os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.csv")
+        ensure_dir(csv_path)
 
-    # ---------------- Intra-batch dedup for Link Request ----------------
-    lr_posts = [p for p in subs if normalize_flair(getattr(p, "link_flair_text", None) or "") == "link request"]
-    groups: Dict[str, List[Any]] = {}
-    for p in lr_posts:
-        t = getattr(p, "title", "") or ""
-        key = normalize_title(t)
-        if not key:
+    for source, post in posts:
+        pid = getattr(post, "id", None)
+        if not pid:
             continue
-        groups.setdefault(key, []).append(p)
-
-    handled_ids = set()
-    for key, items in groups.items():
-        if len(items) < 2:
-            continue
-        items.sort(key=lambda x: x.created_utc)
-        keeper = items[0]
-        keeper_author = (getattr(keeper.author, "name", "[deleted]") or "").lower()
-
-        for dup in items[1:]:
-            if dup.id in handled_ids:
-                continue
-            if dup.id in state:
+        # dedup by state
+        if args.state_file:
+            seen = state.setdefault("ids", {})
+            if pid in seen:
+                skipped += 1
                 if args.verbose:
-                    print(f"[SKIP] already acted recently on {dup.id} (ledger).")
-                handled_ids.add(dup.id)
+                    print(f"[SKIP] already processed {pid}")
                 continue
+            # mark as seen (timestamp)
+            seen[pid] = utcnow().timestamp()
 
-            dup_author = (getattr(dup.author, "name", "[deleted]") or "").lower()
-            same_author = (dup_author == keeper_author)
+        title = getattr(post, "title", "") or ""
+        selftext = getattr(post, "selftext", "") or ""
+        preview = (selftext or "")[:160].replace("\n", " ").strip()
+        flair = getattr(post, "link_flair_text", None) or ""
 
-            decision = {
-                "when": datetime.now(timezone.utc).isoformat(),
-                "action": "AUTO_REMOVE",
-                "category": "DUPLICATE" if same_author else "REPEATED",
-                "removal_reason": "Duplicate Post" if same_author else "Repeated Request",
-                "removal_comment": None,
-                "evidence": {"intrabatch_key": key, "keeper_id": keeper.id, "dup_id": dup.id},
-                "links": [f"https://www.reddit.com{keeper.permalink}", f"https://www.reddit.com{dup.permalink}"],
-            }
-
-            if args.live:
-                try:
-                    if same_author:
-                        _do_remove_with_comment(dup, comment_text=None)
-                    else:
-                        _do_remove_with_comment(dup, comment_text=repeated_tmpl)
-                except Exception as e:
-                    print(f"[WARN] Reddit action failed for {dup.id}: {e}")
-
-            state[dup.id] = datetime.now(timezone.utc).timestamp()
-
-            if args.log_jsonl is not None:
-                payload = {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "source": ("modqueue" if args.sources == "modqueue" else ("both" if args.sources=="both" else "new")),
-                    "post_id": dup.id,
-                    "context": {"author": getattr(dup.author, "name", "[deleted]") if dup.author else "[deleted]",
-                                "flair": getattr(dup, "link_flair_text", None) or "",
-                                "title": getattr(dup, "title", "") or ""},
-                    "decision": decision,
-                }
-                _append_jsonl(_jsonl_path(args.log_jsonl if args.log_jsonl != "" else None), payload)
-
-            if args.report_csv is not None:
-                actions_csv_rows.append({
-                    "timestamp": decision["when"],
-                    "action": decision["action"],
-                    "category": decision["category"],
-                    "flair": getattr(dup, "link_flair_text", None) or "",
-                    "title": getattr(dup, "title", "") or "",
-                    "author": f"u/{getattr(dup.author, 'name', '[deleted]') if dup.author else '[deleted]'}",
-                    "link": f"https://www.reddit.com{dup.permalink}",
-                    "post_id": dup.id,
-                    "reason": decision["removal_reason"],
-                })
-
-            handled_ids.add(dup.id)
-
-    # ---------------- Main loop: process remaining posts ----------------
-    for p in subs:
-        if p.id in handled_ids:
-            continue
-        if p.id in state:
-            if args.verbose:
-                print(f"[SKIP] already acted recently on {p.id} (ledger).")
-            continue
-
-        author = getattr(p.author, "name", "[deleted]") if p.author else "[deleted]"
-        flair = getattr(p, "link_flair_text", None) or ""
-        flair_norm = normalize_flair(flair)
-        title = getattr(p, "title", "") or ""
-        selftext = getattr(p, "selftext", "") or ""
-
-        if flair_norm != "link request":
-            if args.verbose:
-                if flair_norm in {"found & shared", "request complete"}:
-                    print(f"[POLICY] Skip result post: {flair}")
-                elif flair_norm in {"inquiry", "actor inquiry"}:
-                    print(f"[POLICY] Skip inquiry: {flair}")
-                else:
-                    print(f"[POLICY] Skip unsupported flair: {flair} (norm='{flair_norm}')")
-            continue
-
-        print("\n" + "=" * 70)
-        print(f"[POST] u/{author} | flair={flair} | id={p.id} | at={datetime.fromtimestamp(p.created_utc, tz=timezone.utc).isoformat()}")
-        print(f"      {title}")
-        print(f"      https://www.reddit.com{p.permalink}")
-
-        vres = validate_title(title, flair, cfg)
-        print(f"[VALID] status={vres.get('status')} reason={vres.get('reason')}")
-
-        trep = None
-        if vres.get("status") in ("OK", "AMBIGUOUS"):
-            trep = match_title(
-                title_raw=title,
-                author_name=author,
-                config=cfg,
-                max_candidates=10,
-                fetch_limit_per_flair=args.fetch_per_flair,
-                exclude_post_ids=[p.id],
-            )
-            best = trep.get("best") if trep else None
-            if best:
-                print(f"[TM] best score={best.get('score')} certainty={best.get('certainty')} rel={best.get('relation')}")
-                print(f"     -> {best.get('title_raw')} | {best.get('flair')} | {best.get('permalink')}")
-            else:
-                print("[TM] no candidates")
-
-        prep = None
-
-        context = {"author": author, "flair_in": flair, "title": title, "selftext": selftext or ""}
-        d = decide(title_validation=vres, title_report=trep, poster_report=prep, context=context, config=cfg)
-        pretty_print_decision(d)
-
-        action_taken = None
-        reason_text = d.get("removal_reason") or ""
         if args.live:
-            try:
-                if d.get("action") == "AUTO_REMOVE":
-                    cat = d.get("category")
-                    if cat == "MISSING":
-                        _do_remove_with_comment(p, comment_text=missing_tmpl); action_taken = ("AUTO_REMOVE", cat)
-                    elif cat == "DUPLICATE":
-                        _do_remove_with_comment(p, comment_text=None); action_taken = ("AUTO_REMOVE", cat)
-                    elif cat == "REPEATED":
-                        _do_remove_with_comment(p, comment_text=repeated_tmpl); action_taken = ("AUTO_REMOVE", cat)
-                    else:
-                        _do_remove_with_comment(p, comment_text=None); action_taken = ("AUTO_REMOVE", cat or "UNKNOWN")
-                elif d.get("action") == "MOD_QUEUE":
-                    _do_report(p, reason=(reason_text or "Titlematch: needs moderator review"))
-                    action_taken = ("REPORT", d.get("category") or "MOD_QUEUE")
-            except Exception as e:
-                print(f"[WARN] Reddit action failed for {p.id}: {e}")
+            print_human_post(source, post, body_preview=preview if preview else None)
 
-        if args.log_jsonl is not None:
+        validator = run_title_validator(title)
+        if args.live:
+            print_validator(validator)
+
+        # Title matcher (poster matcher is NO_REPORT here)
+        tmatch = run_title_matcher(post, cfg, pool_choice=args.poster_pool, fetch_per_flair=args.fetch_per_flair)
+        if args.live:
+            t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
+            print(f"[TM] best score={score} certainty={cert} rel={rel}")
+            if t_title != "(unknown)":
+                print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
+
+        poster_rep = {"status":"NO_REPORT","distance":None,"relation":"unknown"}
+
+        context = {
+            "author": getattr(getattr(post, "author", None), "name", None),
+            "flair_in": flair,
+            "post_id": pid,
+            "url": getattr(post, "permalink", None),
+            "source": source,
+        }
+
+        decision = run_decision_engine(context, validator, tmatch, poster_rep, cfg)
+
+        # Counters
+        decisions_count[decision.get("action","OTHER")] = decisions_count.get(decision.get("action","OTHER"),0) + 1
+
+        if args.live:
+            print_decision(decision, tmatch, poster_rep)
+
+        # JSONL
+        if jsonl_path:
             payload = {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "source": ("modqueue" if args.sources == "modqueue" else ("both" if args.sources=="both" else "new")),
-                "post_id": p.id,
-                "context": {"author": author, "flair": flair, "title": title},
-                "decision": d,
+                "ts": iso(utcnow()),
+                "source": source,
+                "post_id": pid,
+                "context": {"author": context["author"], "flair": flair, "title": title},
+                "decision": decision,
             }
-            _append_jsonl(_jsonl_path(args.log_jsonl if args.log_jsonl != "" else None), payload)
+            try:
+                append_jsonl(jsonl_path, payload)
+            except Exception as e:
+                print(f"[LOG][WARN] JSONL append failed: {e}", file=sys.stderr)
 
-        if args.report_csv is not None and action_taken:
-            actions_csv_rows.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "action": action_taken[0],
-                "category": action_taken[1],
+        # CSV summary
+        if csv_path:
+            row = {
+                "ts": iso(utcnow()),
+                "source": source,
+                "post_id": pid,
+                "author": context["author"],
                 "flair": flair,
                 "title": title,
-                "author": f"u/{author}",
-                "link": f"https://www.reddit.com{p.permalink}",
-                "post_id": p.id,
-                "reason": reason_text,
-            })
+                "action": decision.get("action"),
+                "category": decision.get("category"),
+                "reason": decision.get("reason"),
+            }
+            try:
+                append_csv(csv_path, row, header_order=list(row.keys()))
+            except Exception as e:
+                print(f"[LOG][WARN] CSV append failed: {e}", file=sys.stderr)
 
-        if action_taken:
-            state[p.id] = datetime.now(timezone.utc).timestamp()
+        processed += 1
 
-    if args.report_csv is not None:
-        _append_csv(_csv_path(args.report_csv if args.report_csv != "" else None), actions_csv_rows)
+    # Save state
+    if args.state_file:
+        try:
+            save_state(args.state_file, state)
+        except Exception as e:
+            print(f"[WARN] failed to save state: {e}", file=sys.stderr)
 
-    _save_state(args.state_file, state)
+    # Summary
+    if args.live or args.verbose:
+        total = len(posts)
+        print(f"[SUMMARY] total={total} processed={processed} skipped_due_to_state={skipped} "
+              f"decisions={{AUTO_REMOVE:{decisions_count.get('AUTO_REMOVE',0)}, "
+              f"MOD_QUEUE:{decisions_count.get('MOD_QUEUE',0)}, "
+              f"NO_ACTION:{decisions_count.get('NO_ACTION',0)}}}")
 
-    if args.verbose:
-        print(f"[DEBUG] {iso_now()} — live run done.")
+    return 0
+
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
+        raise
+

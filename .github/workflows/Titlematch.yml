@@ -2,7 +2,7 @@ name: Titlematch 24/7
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # co 15 min, UTC
+    - cron: "*/15 * * * *"   # co 15 min (UTC)
   workflow_dispatch:
 
 concurrency:
@@ -12,20 +12,27 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install praw pyyaml rapidfuzz
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install praw pyyaml rapidfuzz requests
+          fi
 
-      - name: Create praw.ini
+      - name: Create praw.ini from secrets
         run: |
           cat > praw.ini << 'EOF'
           [Cleanup_Bot]
@@ -35,6 +42,25 @@ jobs:
           password=${{ secrets.REDDIT_PASSWORD }}
           user_agent=Titlematch-Scanner/1.0 by u/${{ secrets.REDDIT_USERNAME }}
           EOF
+          echo "praw.ini created (section: Cleanup_Bot)"
+
+      - name: Ensure config.yaml exists
+        run: |
+          if [ ! -f config.yaml ]; then
+            echo "::error::config.yaml not found in repo root."
+            exit 1
+          fi
+
+      - name: Restore Titlematch state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          key: titlematch-state-
+          restore-keys: |
+            titlematch-state-
+
+      - name: Ensure dirs
+        run: mkdir -p cache logs
 
       - name: Run recent_scan_live.py (poster OFF)
         run: |
@@ -45,14 +71,22 @@ jobs:
             --poster never \
             --poster-pool top \
             --live \
+            --state-file "cache/state.json" \
+            --state-ttl-min 180 \
             --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \
           | tee titlematch_run.txt
 
-      - name: Upload JSONL + console log
+      - name: Save Titlematch state cache
+        uses: actions/cache/save@v4
+        with:
+          path: cache
+          key: titlematch-state-${{ github.run_id }}
+
+      - name: Upload artifacts (logs & run output)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: titlematch-logs-${{ github.run_id }}
           path: |
-            logs/decisions_*.jsonl
             titlematch_run.txt
+            logs/decisions_*.jsonl

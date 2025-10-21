@@ -1,0 +1,16 @@
+# Core Reddit API client
+praw==7.7.1
+
+# Config and data
+PyYAML==6.0.2
+requests==2.31.0
+
+# Text similarity
+rapidfuzz==3.9.3
+
+# Image hashing (Poster Matcher – obecnie wyłączony, ale zostaje dla zgodności)
+imagehash==4.3.1
+Pillow==10.3.0
+
+# Utility libraries
+tqdm==4.66.2

@@ -1,0 +1,53 @@
+name: Set Request Complete (2x daily)
+
+on:
+  schedule:
+    - cron: "5 7 * * *"
+    - cron: "5 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: set-complete
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: { attempt: [1, 2] } # retry
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install praw requests pyyaml
+
+      - name: Create praw.ini
+        run: |
+          cat > praw.ini << 'EOF'
+          [DEFAULT]
+          client_id=${{ secrets.REDDIT_CLIENT_ID }}
+          client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
+          username=${{ secrets.REDDIT_USERNAME }}
+          password=${{ secrets.REDDIT_PASSWORD }}
+          user_agent=Cleanup-SetComplete/1.0 by u/${{ secrets.REDDIT_USERNAME }}
+          EOF
+
+      - name: Run action_set_compl_gemrec.py
+        run: |
+          echo "Attempt ${{ matrix.attempt }}"
+          python action_set_compl_gemrec.py --days 3 --limit 200 --confirm --debug | tee run_log.txt
+
+      - name: Upload log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: set-complete-log-${{ github.run_id }}-attempt-${{ matrix.attempt }}
+          path: run_log.txt

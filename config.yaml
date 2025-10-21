@@ -33,3 +33,8 @@ comments:
 
 poster:
   default_mode: never   # Poster Matcher is disabled, but config kept for compatibility
+
+runtime:
+  state_file: cache/state.json
+  state_ttl_min: 180
+

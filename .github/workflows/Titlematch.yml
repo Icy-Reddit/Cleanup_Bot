@@ -38,14 +38,13 @@ jobs:
 
       - name: Run recent_scan_live.py (poster OFF)
         run: |
-          # 60-min lookback, both sources, poster=never
           python recent_scan_live.py \
-            --subreddit r/CShortDramas \
-            --window-min 60 \
+            --window 60 \
             --sources both \
-            --limit 200 \
+            --limit-per-source 200 \
             --poster never \
-            --plan \
+            --poster-pool top \
+            --live \
             --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \
           | tee titlematch_run.txt
 

@@ -1,0 +1,59 @@
+name: Titlematch 24/7
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # co 15 min, UTC
+  workflow_dispatch:
+
+concurrency:
+  group: titlematch-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install praw pyyaml rapidfuzz
+
+      - name: Create praw.ini
+        run: |
+          cat > praw.ini << 'EOF'
+          [DEFAULT]
+          client_id=${{ secrets.REDDIT_CLIENT_ID }}
+          client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
+          username=${{ secrets.REDDIT_USERNAME }}
+          password=${{ secrets.REDDIT_PASSWORD }}
+          user_agent=Titlematch-Scanner/1.0 by u/${{ secrets.REDDIT_USERNAME }}
+          EOF
+
+      - name: Run recent_scan_live.py (poster OFF)
+        run: |
+          # 60-min lookback, both sources, poster=never
+          python recent_scan_live.py \
+            --subreddit r/CShortDramas \
+            --window-min 60 \
+            --sources both \
+            --limit 200 \
+            --poster never \
+            --plan \
+            --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \
+          | tee titlematch_run.txt
+
+      - name: Upload JSONL + console log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: titlematch-logs-${{ github.run_id }}
+          path: |
+            logs/decisions_*.jsonl
+            titlematch_run.txt

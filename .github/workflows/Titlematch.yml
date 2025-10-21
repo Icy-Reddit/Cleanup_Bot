@@ -28,7 +28,7 @@ jobs:
       - name: Create praw.ini
         run: |
           cat > praw.ini << 'EOF'
-          [DEFAULT]
+          [Cleanup_Bot]
           client_id=${{ secrets.REDDIT_CLIENT_ID }}
           client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
           username=${{ secrets.REDDIT_USERNAME }}

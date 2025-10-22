@@ -36,6 +36,7 @@ import datetime as dt
 import json
 import os
 import sys
+import inspect
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -104,7 +105,6 @@ def append_csv(path: str, row: Dict[str, Any], header_order: Optional[List[str]]
     ensure_dir(path)
     exists = os.path.exists(path)
     with open(path, "a", encoding="utf-8", newline="") as f:
-        import csv
         writer = csv.DictWriter(f, fieldnames=header_order or list(row.keys()))
         if not exists:
             writer.writeheader()
@@ -175,10 +175,16 @@ def fetch_candidates(r: praw.Reddit, sub_name: str, sources: str, limit_per_sour
 
 # ---------------------------- Adapters ---------------------------------
 
-def run_title_validator(title: str) -> Dict[str, Any]:
+def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
+    """Call title_validator.validate_title with compatible signature."""
     if title_validator and hasattr(title_validator, "validate_title"):
         try:
-            return title_validator.validate_title(title)
+            fn = title_validator.validate_title
+            params = [p.lower() for p in inspect.signature(fn).parameters.keys()]
+            if all(x in params for x in ("title", "flair", "config")):
+                return fn(title, flair, cfg)   # Your variant
+            else:
+                return fn(title)               # Fallback variant
         except Exception as e:
             return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
     # Fallback heuristic if module missing:
@@ -187,42 +193,40 @@ def run_title_validator(title: str) -> Dict[str, Any]:
         return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
     return {"status": "OK", "reason": "title_candidate"}
 
-def run_title_matcher(post: Any, cfg: dict, pool_choice: str = "top", fetch_per_flair: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Try to call into title_matcher to get a report structure.
-    Expected keys in result (best effort):
-      {
-        "best": {"score": int, "certainty": "low|borderline|certain", "relation": "same_author|different_author", "candidate": {title, flair, permalink, author}},
-        "top": [ ... ],
-        "pool_ids": [...]
-      }
-    """
+def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
+    """Call into title_matcher using only safe kwargs that match its signature."""
     if not title_matcher:
         return {"best": None, "pool_ids": [], "top": []}
 
-    # Prefer a function named match_title_for_post; otherwise match_title
-    for fn_name in ("match_title_for_post", "match_title"):
-        fn = getattr(title_matcher, fn_name, None)
-        if not fn:
-            continue
+    try_order = []
+    fn = getattr(title_matcher, "match_title_for_post", None)
+    if callable(fn):
+        try_order.append(("match_title_for_post", fn))
+    fn2 = getattr(title_matcher, "match_title", None)
+    if callable(fn2):
+        try_order.append(("match_title", fn2))
+
+    for name, fn in try_order:
         try:
-            # Flexible kwargs — implementation should ignore unknowns.
-            kw = {
-                "post": post,
-                "config": cfg,
-                "pool": pool_choice,
-                "fetch_per_flair": fetch_per_flair,
-                "exclude_post_id": getattr(post, "id", None),
-                "exclude_post_url": getattr(post, "permalink", None),
-            }
-            codevars = getattr(fn, "__code__", None)
-            if codevars:
-                allowed = fn.__code__.co_varnames
-                kw = {k: v for k, v in kw.items() if k in allowed}
+            params = set(getattr(fn, "__code__", None).co_varnames if getattr(fn, "__code__", None) else [])
+            kw = {}
+            if "post" in params:
+                kw["post"] = post
+            if "config" in params:
+                kw["config"] = cfg
+            if "exclude_post_id" in params:
+                kw["exclude_post_id"] = getattr(post, "id", None)
+            if "exclude_post_url" in params:
+                kw["exclude_post_url"] = getattr(post, "permalink", None)
+            # IMPORTANT: do NOT pass unsupported kwargs like "pool", "fetch_per_flair"
             rep = fn(**kw)
             return rep or {"best": None, "pool_ids": [], "top": []}
+        except TypeError as e:
+            print(f"[WARN] title_matcher.{name} signature mismatch: {e}", file=sys.stderr)
+            continue
         except Exception as e:
-            print(f"[WARN] title_matcher.{fn_name} failed: {e}", file=sys.stderr)
+            print(f"[WARN] title_matcher.{name} failed: {e}", file=sys.stderr)
+            continue
 
     return {"best": None, "pool_ids": [], "top": []}
 
@@ -351,7 +355,6 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
             print(f"- {L}")
     print("===============================================")
 
-
 # ------------------------------ Main ------------------------------------
 
 def main() -> int:
@@ -436,12 +439,12 @@ def main() -> int:
         if args.live:
             print_human_post(source, post, body_preview=preview if preview else None)
 
-        validator = run_title_validator(title)
+        validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
 
-        # Title matcher (poster matcher is NO_REPORT here)
-        tmatch = run_title_matcher(post, cfg, pool_choice=args.poster_pool, fetch_per_flair=args.fetch_per_flair)
+        # Title matcher (safe-call without unsupported kwargs)
+        tmatch = run_title_matcher(post, cfg)
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
             print(f"[TM] best score={score} certainty={cert} rel={rel}")
@@ -524,4 +527,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
         raise
-

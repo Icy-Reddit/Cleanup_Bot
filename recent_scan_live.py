@@ -389,8 +389,16 @@ def main() -> int:
 
         title = getattr(post, "title", "") or ""
         selftext = getattr(post, "selftext", "") or ""
-        preview = (selftext or "")[:160].replace("\n", " ").strip()
+        preview = (selftext or "")[:160].replace("
+", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
+
+        # --- POLICY GATE (before any printing/validation) ---
+        flair_norm = (flair or "").strip().lower()
+        if flair_norm != "link request":
+            if args.verbose:
+                print(f"[POLICY] Skip non-Link Request: {flair} (norm='{flair_norm}')")
+            continue
 
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
@@ -399,19 +407,7 @@ def main() -> int:
         if args.live:
             print_validator(validator)
 
-        # --- Policy: only analyze Link Request in live mode ---
-        flair_norm = (flair or "").strip().lower()
-        if flair_norm != "link request":
-            if args.verbose:
-                if flair_norm in {"found & shared", "request complete"}:
-                    print(f"[POLICY] Skip result post: {flair}")
-                elif flair_norm in {"inquiry", "actor inquiry"}:
-                    print(f"[POLICY] Skip inquiry: {flair}")
-                else:
-                    print(f"[POLICY] Skip unsupported flair: {flair} (norm='{flair_norm}')")
-            continue
-
-        tmatch = run_title_matcher(post, cfg)
+                tmatch = run_title_matcher(post, cfg)
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
             print(f"[TM] best score={score} certainty={cert} rel={rel}")
@@ -478,3 +474,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

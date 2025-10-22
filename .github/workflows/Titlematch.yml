@@ -1,17 +1,21 @@
-name: Titlematch 24/7
+name: Titlematch (live)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # co 15 min (UTC)
-  workflow_dispatch:
+    - cron: "*/15 * * * *"   # co 15 minut (GitHub może czasem odpalić ~20–30 min)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 concurrency:
-  group: titlematch-scan
-  cancel-in-progress: false
+  group: titlematch-live
+  cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -23,70 +27,53 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install praw pyyaml rapidfuzz requests
-          fi
+          pip install praw==7.8.1 pyyaml rapidfuzz requests
 
-      - name: Create praw.ini from secrets
+      # Tworzymy praw.ini z sekcją Cleanup_Bot na podstawie sekretów
+      - name: Write praw.ini
+        env:
+          PRAW_CLIENT_ID: ${{ secrets.PRAW_CLIENT_ID }}
+          PRAW_CLIENT_SECRET: ${{ secrets.PRAW_CLIENT_SECRET }}
+          PRAW_USERNAME: ${{ secrets.PRAW_USERNAME }}
+          PRAW_PASSWORD: ${{ secrets.PRAW_PASSWORD }}
         run: |
+          mkdir -p cache logs
           cat > praw.ini << 'EOF'
           [Cleanup_Bot]
-          client_id=${{ secrets.REDDIT_CLIENT_ID }}
-          client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
-          username=${{ secrets.REDDIT_USERNAME }}
-          password=${{ secrets.REDDIT_PASSWORD }}
-          user_agent=Titlematch-Scanner/1.0 by u/${{ secrets.REDDIT_USERNAME }}
+          client_id=${PRAW_CLIENT_ID}
+          client_secret=${PRAW_CLIENT_SECRET}
+          username=${PRAW_USERNAME}
+          password=${PRAW_PASSWORD}
+          user_agent=Titlematch-Scanner/1.0 by u/${PRAW_USERNAME}
           EOF
-          echo "praw.ini created (section: Cleanup_Bot)"
+          echo "praw.ini written"
 
-      - name: Ensure config.yaml exists
-        run: |
-          if [ ! -f config.yaml ]; then
-            echo "::error::config.yaml not found in repo root."
-            exit 1
-          fi
-
-      - name: Restore Titlematch state cache
-        uses: actions/cache/restore@v4
-        with:
-          path: cache
-          key: titlematch-state-
-          restore-keys: |
-            titlematch-state-
-
-      - name: Ensure dirs
-        run: mkdir -p cache logs
-
-      - name: Run recent_scan_live.py (poster OFF)
+      # GŁÓWNY SKANER – w trybie live (wykonuje remove + reason + message)
+      - name: Run Titlematch (live)
         run: |
           python recent_scan_live.py \
-            --window 60 \
+            --config config.yaml \
+            --subreddit CShortDramas \
             --sources both \
+            --window 60 \
             --limit-per-source 200 \
-            --poster never \
-            --poster-pool top \
-            --live \
-            --state-file "cache/state.json" \
+            --state-file cache/state.json \
             --state-ttl-min 180 \
-            --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \
-          | tee titlematch_run.txt
+            --log-jsonl \
+            --report-csv \
+            --live \
+            --execute live
 
-      - name: Save Titlematch state cache
-        uses: actions/cache/save@v4
-        with:
-          path: cache
-          key: titlematch-state-${{ github.run_id }}
-
-      - name: Upload artifacts (logs & run output)
+      # Artefakty z logami (JSONL + CSV) do podglądu po jobie
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: titlematch-logs-${{ github.run_id }}
           path: |
-            titlematch_run.txt
-            logs/decisions_*.jsonl
+            logs/**
+            cache/state.json
+          if-no-files-found: warn

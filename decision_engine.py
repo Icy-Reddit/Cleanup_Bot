@@ -1,209 +1,277 @@
 # decision_engine.py
+# r/CShortDramas — Decision Engine (robust; poster optional/disabled)
+#
+# Spec (skrót):
+# Input:
+#   context:  {"author","flair_in","post_id","url","source",...}
+#   validator: {"status":"OK|AMBIGUOUS|MISSING", "reason": "..."}
+#   title_report: {"best": {...} or None, "top": [...], "pool_ids": [...]}
+#       best := {
+#         "score": int,
+#         "certainty": "certain|borderline|low",
+#         "relation": "same_author|different_author|unknown",
+#         "type": "normalized_exact|fuzzy|exact|none",
+#         "candidate": {"title","permalink","flair","author"}
+#       }
+#   poster_report: {"status":"CERTAIN|UNSURE|NONE|NO_IMAGE|NO_REPORT", "distance": int|None, ...} or None
+#   config: dict (thresholds, phrases, comments)
+#
+# Output (DecisionReport):
+# {
+#   "action": "AUTO_REMOVE|MOD_QUEUE|NO_ACTION",
+#   "category": "MISSING|DUPLICATE|REPEATED|AMBIGUOUS|CONFLICT|NO_SIGNAL|AGE_WINDOW|ENGINE_ERROR",
+#   "reason": "human-readable summary",
+#   "removal_reason": "Duplicate Post|Repeated Request|Lack of Drama Name or Description in Title|None",
+#   "removal_comment": str|None,
+#   "evidence": {
+#       "title_match": { "type":str, "score":int, "relation":str, "candidate": {...} },
+#       "poster_match": { "status":str, "distance":int|None, "candidate": {...} }
+#   },
+#   "links": ["https://..."]
+# }
+
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
-import re
 
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# Minimal, defensive imports (no typing usage in runtime)
+# — plik ma działać nawet w niestandardowych środowiskach runnera.
 
-def _cfg_get(d: Dict[str, Any], path: List[str], default: Any):
-    cur = d
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
+# ------------------------------- Defaults & helpers -------------------------------
 
-def _token_stats(norm_text: str) -> dict:
-    has_cjk = bool(re.search(r"[\u4e00-\u9FFF]", norm_text or ""))
-    toks = [w for w in ((norm_text or "").split()) if w]
-    return {"n": len(toks), "has_cjk": has_cjk, "chars": len(norm_text or "")}
-
-# Komentarze – fallback (mogą być nadpisane w config.yaml)
-REPEATED_COMMENT_FALLBACK = (
-    "This link was already requested, you may have overlooked it. Please scroll in link requests or try keywords or title in the search bar. "
-    "You may get lucky and it’s already found — or you click follow when you find the earlier post and we’re all fine.\n"
-    "How to Use the Search Bar in Our Subreddit: "
-    "https://www.reddit.com/r/CShortDramas/comments/1ig6a8j/how_to_use_the_search_bar_in_our_subreddit/"
-)
-
-MISSING_TITLE_FALLBACK = (
-    "Your post has been removed because it doesn't include the drama name or a short description in the header. "
-    "This is required to keep the subreddit organized and help others find and fulfill similar requests.\n"
-    "If the name is visible on the poster, just add it to the header.\n"
-    "If there’s no name, please add a short description instead. Think of what caught your attention, add the genre, storyline, actor’s name, or a brief summary of what you saw in the ad.\n"
-    "Why do we ask this? Because search terms like “link” or “Do you know the title?” aren’t helpful for others looking for the same drama."
-)
-
-# ---- subset/short-title guard helpers ----
-_CONTENT_STOP = {
-    "the","a","an","to","of","for","and","or","with","in","on","at","by",
-    "my","your","our","their","his","her","him","me","you","we","they",
-    "is","are","was","were","be","been","being","do","does","did","done",
-    "this","that","these","those","from","as","but","if","then","so","not",
+_DEFAULTS = {
+    "decision": {
+        "title_threshold_auto": 93,
+        "title_threshold_border": 85,
+        "text_short_title_min_tokens": 3,
+        "time_window_days": 14,
+    },
+    "phrases": {
+        "allow_repost_hints": [
+            "dead link", "links expired", "repost", "again", "previous request"
+        ]
+    },
+    "comments": {
+        "repeated_request_template": (
+            "This link was already requested, you may have overlooked it. Please scroll in link requests or try keywords or title in the search bar. You may get lucky and it’s already found — or you click follow when you find the earlier post and we’re all fine.\n"
+            "How to Use the Search Bar in Our Subreddit:\n"
+            "https://www.reddit.com/r/CShortDramas/comments/1ig6a8j/how_to_use_the_search_bar_in_our_subreddit/"
+        ),
+        "missing_title_template": (
+            "Your post has been removed because it doesn't include the drama name or a short description in the header. This is required to keep the subreddit organized and help others find and fulfill similar requests.\n"
+            "If the name is visible on the poster, just add it to the header.\n"
+            "If there’s no name, please add a short description instead. Think of what caught your attention, add the genre, storyline, actor’s name, or a brief summary of what you saw in the ad.\n"
+            "Why do we ask this? Because search terms like “link” or “Do you know the title?” aren’t helpful for others looking for the same drama."
+        ),
+    },
 }
 
-def _split_tokens(s: str) -> List[str]:
-    return [t for t in (s or "").split() if t]
+def _cfg_get(cfg, path, default):
+    cur = cfg or {}
+    for key in path.split("."):
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
 
-def _content_tokens(s: str) -> List[str]:
-    return [t for t in _split_tokens(s) if t not in _CONTENT_STOP]
+def _thresholds(cfg):
+    auto_t = int(_cfg_get(cfg, "decision.title_threshold_auto", _DEFAULTS["decision"]["title_threshold_auto"]))
+    border_t = int(_cfg_get(cfg, "decision.title_threshold_border", _DEFAULTS["decision"]["title_threshold_border"]))
+    return auto_t, border_t
 
-def _coverage(a_norm: str, b_norm: str):
-    """Pokrycie na treściowych tokenach: (pokrycie_query, pokrycie_kandydata, overlap, |qa|, |qb|)"""
-    a = set(_content_tokens(a_norm))
-    b = set(_content_tokens(b_norm))
-    if not a or not b:
-        return 0.0, 0.0, 0, 0, 0
-    overlap = len(a & b)
-    cov_a = overlap / max(1, len(a))
-    cov_b = overlap / max(1, len(b))
-    return cov_a, cov_b, overlap, len(a), len(b)
+def _poster_status(poster_report):
+    """
+    Normalize poster status; treat NO_REPORT as NONE (poster disabled).
+    """
+    st = ((poster_report or {}).get("status") or "NONE").upper()
+    if st == "NO_REPORT":
+        return "NONE"
+    return st
 
-def decide(
-    *,
-    title_validation: Dict[str, Any],
-    title_report: Optional[Dict[str, Any]],
-    poster_report: Optional[Dict[str, Any]],
-    context: Dict[str, Any],
-    config: Dict[str, Any],
-) -> Dict[str, Any]:
+def _full_url(link):
+    if not link:
+        return None
+    s = str(link)
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    if s.startswith("/r/") or s.startswith("r/"):
+        return "https://www.reddit.com" + (s if s.startswith("/") else "/" + s)
+    return s
 
-    thr_title_auto   = int(_cfg_get(config, ["decision", "title_threshold_auto"], 93))
-    thr_title_border = int(_cfg_get(config, ["decision", "title_threshold_border"], 85))
+def _evidence_title(title_report):
+    best = (title_report or {}).get("best") or {}
+    cand = best.get("candidate") or {}
+    return {
+        "type": best.get("type") or ("fuzzy" if best else "none"),
+        "score": int(best.get("score") or 0),
+        "relation": best.get("relation") or "unknown",
+        "candidate": {
+            "title": cand.get("title"),
+            "permalink": _full_url(cand.get("permalink")),
+            "flair": cand.get("flair"),
+            "author": cand.get("author"),
+        }
+    }
 
-    # parametry guardów (możesz ustawić w config.yaml)
-    short_title_max_tokens = int(_cfg_get(config, ["decision","short_title_max_tokens"], 3))
-    min_cov_query_for_auto = float(_cfg_get(config, ["decision","min_cov_query_for_auto"], 0.90))
-    min_cov_cand_for_auto  = float(_cfg_get(config, ["decision","min_cov_cand_for_auto"], 0.50))
+def _evidence_poster(poster_report):
+    return {
+        "status": _poster_status(poster_report),
+        "distance": (poster_report or {}).get("distance"),
+        "candidate": (poster_report or {}).get("candidate"),
+    }
 
-    repeated_tmpl = _cfg_get(config, ["comments", "repeated_request_template"], REPEATED_COMMENT_FALLBACK)
-    missing_tmpl  = _cfg_get(config, ["comments", "missing_title_template"], MISSING_TITLE_FALLBACK)
+def _links_from_title(title_report):
+    best = (title_report or {}).get("best") or {}
+    cand = best.get("candidate") or {}
+    link = _full_url(cand.get("permalink"))
+    return [link] if link else []
 
-    ev_title = {"type": "none", "score": None, "certainty": "none", "relation": "unknown", "candidate": None}
-    ev_postr = {"status": "NO_REPORT", "distance": None, "relation": "unknown", "candidate": None}
-    links: List[str] = []
+def _comment_from_config(cfg, key, fallback):
+    return _cfg_get(cfg, "comments." + key, fallback)
 
-    # 1) Brak tytułu → auto-remove
-    if title_validation.get("status") == "MISSING":
-        rr = "Lack of Drama Name or Description in Title"
+def _is_title_border(score, auto_t, border_t):
+    return border_t <= int(score or 0) < auto_t
+
+def _is_title_certain(score, auto_t):
+    return int(score or 0) >= auto_t
+
+
+# ---------------------------------- Core ----------------------------------
+
+def decide(*, context, validator, title_report, poster_report, config=None):
+    """
+    Robust Decision Engine — never raises, always returns a valid DecisionReport.
+    """
+    try:
+        auto_t, border_t = _thresholds(config)
+
+        # 0) ALWAYS handle MISSING first — no other logic may block this.
+        v_status = (validator or {}).get("status") or "OK"
+        if v_status == "MISSING":
+            rr = "Lack of Drama Name or Description in Title"
+            comment = _comment_from_config(config, "missing_title_template", _DEFAULTS["comments"]["missing_title_template"])
+            return {
+                "action": "AUTO_REMOVE",
+                "category": "MISSING",
+                "reason": "Title missing per validator.",
+                "removal_reason": rr,
+                "removal_comment": comment,
+                "evidence": {
+                    "title_match": _evidence_title(title_report),
+                    "poster_match": _evidence_poster(poster_report),
+                },
+                "links": _links_from_title(title_report),
+            }
+
+        # 1) Collect evidence (safe)
+        t_evd = _evidence_title(title_report)
+        t_score = int(t_evd.get("score") or 0)
+        t_type  = t_evd.get("type") or "none"
+        t_rel   = t_evd.get("relation") or "unknown"
+
+        p_evd = _evidence_poster(poster_report)
+        p_status = p_evd.get("status") or "NONE"  # CERTAIN|UNSURE|NONE|NO_IMAGE
+
+        # 2) Duplicate / Repeated (title certain or poster CERTAIN)
+        # same_author / different_author / unknown
+        if t_rel == "same_author" and (_is_title_certain(t_score, auto_t) or p_status == "CERTAIN"):
+            return {
+                "action": "AUTO_REMOVE",
+                "category": "DUPLICATE",
+                "reason": "Duplicate: same author and either title match is certain or poster is CERTAIN.",
+                "removal_reason": "Duplicate Post",
+                "removal_comment": None,
+                "evidence": {
+                    "title_match": t_evd,
+                    "poster_match": p_evd,
+                },
+                "links": _links_from_title(title_report),
+            }
+
+        if t_rel == "different_author" and (_is_title_certain(t_score, auto_t) or p_status == "CERTAIN"):
+            comment = _comment_from_config(config, "repeated_request_template", _DEFAULTS["comments"]["repeated_request_template"])
+            return {
+                "action": "AUTO_REMOVE",
+                "category": "REPEATED",
+                "reason": "Repeated request: different author and either title match is certain or poster is CERTAIN.",
+                "removal_reason": "Repeated Request",
+                "removal_comment": comment,
+                "evidence": {
+                    "title_match": t_evd,
+                    "poster_match": p_evd,
+                },
+                "links": _links_from_title(title_report),
+            }
+
+        # 3) Borderline title without poster confirmation → Mod Queue
+        if _is_title_border(t_score, auto_t, border_t) and p_status in ("NONE", "NO_IMAGE", "UNSURE"):
+            return {
+                "action": "MOD_QUEUE",
+                "category": "AMBIGUOUS",
+                "reason": f"Borderline title score ({t_score}) without poster confirmation.",
+                "removal_reason": None,
+                "removal_comment": None,
+                "evidence": {
+                    "title_match": t_evd,
+                    "poster_match": p_evd,
+                },
+                "links": _links_from_title(title_report),
+            }
+
+        # 4) Poster uncertain alone (if poster ever re-enabled)
+        if p_status == "UNSURE":
+            return {
+                "action": "MOD_QUEUE",
+                "category": "AMBIGUOUS",
+                "reason": "Poster uncertain.",
+                "removal_reason": None,
+                "removal_comment": None,
+                "evidence": {
+                    "title_match": t_evd,
+                    "poster_match": p_evd,
+                },
+                "links": _links_from_title(title_report),
+            }
+
+        # 5) Conflict (exact/normalized_exact title but poster not confirming) — only if poster active
+        if t_type in ("exact", "normalized_exact") and p_status not in ("NONE", "NO_IMAGE"):
+            if p_status != "CERTAIN":
+                return {
+                    "action": "MOD_QUEUE",
+                    "category": "CONFLICT",
+                    "reason": "Exact/normalized-exact title, but poster evidence conflicts or is inconclusive.",
+                    "removal_reason": None,
+                    "removal_comment": None,
+                    "evidence": {
+                        "title_match": t_evd,
+                        "poster_match": p_evd,
+                    },
+                    "links": _links_from_title(title_report),
+                }
+
+        # 6) No strong signals
         return {
-            "when": _now_utc_iso(),
-            "action": "AUTO_REMOVE",
-            "category": "MISSING",
-            "removal_reason": rr,
-            "removal_comment": missing_tmpl,
-            "evidence": {"title_match": ev_title, "poster_match": ev_postr},
-            "links": links,
+            "action": "NO_ACTION",
+            "category": "NO_SIGNAL",
+            "reason": "No strong signals from title and poster.",
+            "removal_reason": None,
+            "removal_comment": None,
+            "evidence": {
+                "title_match": t_evd,
+                "poster_match": p_evd,
+            },
+            "links": _links_from_title(title_report),
         }
 
-    # 2) Wyciągnij najlepszy tytułowy kandydat
-    best_t = (title_report or {}).get("best") if title_report else None
-    if best_t:
-        ev_title["type"] = "exact" if best_t.get("match_type") == "exact" else "fuzzy"
-        ev_title["score"] = int(best_t.get("score", 0))
-        ev_title["certainty"] = best_t.get("certainty", "low")
-        ev_title["relation"] = best_t.get("relation", "unknown")
-        ev_title["candidate"] = best_t
-        if best_t.get("permalink"):
-            links.append(best_t["permalink"])
-
-    # 3) Guard: nie rób auto-remove na podstawie „pustych” tytułów
-    title_auto_allowed = True
-    if ev_title["candidate"]:
-        cand_norm = ev_title["candidate"].get("title_norm") or ""
-        cand_stats = _token_stats(cand_norm)
-        if (cand_stats["n"] < 2) and (not cand_stats["has_cjk"]):
-            title_auto_allowed = False
-
-    # 4) Subset/short-title guard dla different_author
-    q_norm   = (title_report or {}).get("title_norm", "") if title_report else ""
-    cand_norm = (best_t or {}).get("title_norm", "") if best_t else ""
-    cov_q, cov_c, ov, qn, cn = _coverage(q_norm, cand_norm)
-
-    subsety = (
-        ev_title["candidate"] is not None
-        and ev_title["relation"] == "different_author"
-        and ev_title["type"] != "exact"  # exact → tylko identyczne normy
-        and (
-            qn <= short_title_max_tokens       # bardzo krótki tytuł zapytania
-            or cov_q < min_cov_query_for_auto  # zapytanie nie jest niemal w całości pokryte
-            or cov_c < min_cov_cand_for_auto   # kandydat ma dużo „nadmiaru” treści
-        )
-    )
-
-    # 5) Decyzje progowe
-    if ev_title["score"] is not None and ev_title["score"] >= thr_title_auto and title_auto_allowed:
-        if ev_title["relation"] == "same_author":
-            return _mk_decision("DUPLICATE", "Duplicate Post", None, ev_title, ev_postr, links)
-        if ev_title["relation"] == "different_author":
-            if subsety:
-                return _mk_queue("AMBIGUOUS", "High score but subset/short-title match; needs review.", ev_title, ev_postr, links)
-            return _mk_decision("REPEATED", "Repeated Request", repeated_tmpl, ev_title, ev_postr, links)
-
-    if ev_title["score"] is not None and thr_title_border <= ev_title["score"] < thr_title_auto:
-        return _mk_queue("AMBIGUOUS", "Title match borderline without strong poster confirmation.", ev_title, ev_postr, links)
-
-    # Brak sygnału
-    return {
-        "when": _now_utc_iso(),
-        "action": "NO_ACTION",
-        "category": "NO_SIGNAL",
-        "removal_reason": None,
-        "removal_comment": None,
-        "evidence": {"title_match": ev_title, "poster_match": ev_postr},
-        "links": links,
-    }
-
-def _mk_decision(category: str, rr: str, comment: str | None, ev_title, ev_postr, links):
-    return {
-        "when": _now_utc_iso(),
-        "action": "AUTO_REMOVE",
-        "category": category,
-        "removal_reason": rr,
-        "removal_comment": comment,
-        "evidence": {"title_match": ev_title, "poster_match": ev_postr},
-        "links": links,
-    }
-
-def _mk_queue(category: str, reason: str, ev_title, ev_postr, links):
-    return {
-        "when": _now_utc_iso(),
-        "action": "MOD_QUEUE",
-        "category": category,
-        "removal_reason": reason,
-        "removal_comment": None,
-        "evidence": {"title_match": ev_title, "poster_match": ev_postr},
-        "links": links,
-    }
-
-def pretty_print_decision(report: Dict[str, Any]) -> None:
-    print("=============== DECISION ENGINE ===============")
-    print(f"When: {report.get('when')}")
-    print(f"Action: {report.get('action')} | Category: {report.get('category')}")
-    print(f"Removal Reason: {report.get('removal_reason')}")
-    if report.get("removal_comment"):
-        print("Removal Comment:")
-        print(report["removal_comment"])
-    ev = report.get("evidence", {})
-    tm = ev.get("title_match", {})
-    pm = ev.get("poster_match", {})
-    print("\n-- Title Match --")
-    print(f"type={tm.get('type')} | score={tm.get('score')} | certainty={tm.get('certainty')} | relation={tm.get('relation')}")
-    if tm.get("candidate") and isinstance(tm["candidate"], dict):
-        c = tm["candidate"]
-        print(f"  title='{c.get('title_raw')}' | flair={c.get('flair')} | author={c.get('author')}")
-        print(f"  link={c.get('permalink')}")
-    print("\n-- Poster Match --")
-    print(f"status={pm.get('status')} | distance={pm.get('distance')} | relation={pm.get('relation')}")
-    if pm.get("candidate") and isinstance(pm["candidate"], dict):
-        c = pm["candidate"]
-        print(f"  title='{c.get('title')}' | flair={c.get('flair')} | author={c.get('author')}")
-        print(f"  link={c.get('permalink')}")
-    links = report.get("links") or []
-    if links:
-        print("\nLinks:")
-        for u in links:
-            print(f"- {u}")
-    print("===============================================")
+    except Exception as e:
+        # Defensive catch-all for any unexpected issue
+        return {
+            "action": "MOD_QUEUE",
+            "category": "ENGINE_ERROR",
+            "reason": f"decision_engine_exception: {e}",
+            "removal_reason": None,
+            "removal_comment": None,
+            "evidence": {
+                "title_match": _evidence_title(title_report),
+                "poster_match": _evidence_poster(poster_report),
+            },
+            "links": _links_from_title(title_report),
+        }

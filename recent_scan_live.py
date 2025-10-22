@@ -14,6 +14,9 @@ import json
 import os
 import sys
 import inspect
+import warnings
+warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
+
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import asdict, is_dataclass
 

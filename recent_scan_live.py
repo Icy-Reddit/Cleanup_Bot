@@ -317,12 +317,10 @@ def print_human_post(source: str, post: Any, body_preview: Optional[str] = None)
 def print_validator(rep: Dict[str, Any]) -> None:
     print(f"[VALID] status={rep.get('status')} reason={rep.get('reason')}")
 
-
 def flair_from_rep(rep: Dict[str, Any]) -> str:
     best = (rep or {}).get("best") or {}
     cand = best.get("candidate") or {}
     return cand.get("flair") or ""
-
 
 def summarize_title_matcher(rep: Dict[str, Any]) -> Tuple[str, int, str, str, Optional[str]]:
     best = (rep or {}).get("best") or {}
@@ -333,7 +331,6 @@ def summarize_title_matcher(rep: Dict[str, Any]) -> Tuple[str, int, str, str, Op
     title = cand.get("title") or "(unknown)"
     link = cand.get("permalink") or None
     return title, score, certainty, relation, link
-
 
 def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: Optional[Dict[str, Any]]) -> None:
     print("=============== DECISION ENGINE ===============")
@@ -411,6 +408,11 @@ def main() -> int:
         csv_path = args.report_csv or os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.csv")
         ensure_dir(csv_path)
 
+    # --- Flair policy sets ---
+    FLAIR_LINK_REQUEST = {"📌 Link Request"}
+    FLAIR_SKIP = {"🔗 Found & Shared", "✅ Request Complete"}
+    FLAIR_INQUIRY = {"🎭 Actor Inquiry", "🔍 Inquiry"}
+
     for source, post in posts:
         pid = getattr(post, "id", None)
         if not pid:
@@ -430,32 +432,72 @@ def main() -> int:
         preview = (selftext or "")[:160].replace("\n", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
 
+        # Print the post header early if live
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 
+        # ---------- FLAIR ROUTING ----------
+        # 1) Skip flairs entirely
+        if flair in FLAIR_SKIP or (flair not in FLAIR_LINK_REQUEST and flair not in FLAIR_INQUIRY):
+            if args.live or args.verbose:
+                reason = "Found&Shared/RequestComplete" if flair in FLAIR_SKIP else "non-target flair"
+                print(f"[SKIP] flair={flair or '(none)'} | reason={reason}")
+            # Do not count as processed; just continue
+            continue
+
+        # 2) Inquiry-only: validate title, no matcher, no decision engine
+        if flair in FLAIR_INQUIRY:
+            validator = run_title_validator(title, flair, cfg)
+            if args.live:
+                print_validator(validator)
+                print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
+            # Log a lightweight NO_ACTION row so mamy ślad w raportach
+            if jsonl_path:
+                payload = {
+                    "ts": iso(utcnow()),
+                    "source": source,
+                    "post_id": pid,
+                    "context": {"author": getattr(getattr(post, "author", None), "name", None), "flair": flair, "title": title},
+                    "decision": {
+                        "action": "NO_ACTION",
+                        "category": "VALIDATION_ONLY",
+                        "reason": "Inquiry flair — title validated, matcher skipped",
+                    },
+                }
+                try:
+                    append_jsonl(jsonl_path, payload)
+                except Exception as e:
+                    print(f"[LOG][WARN] JSONL append failed: {e}", file=sys.stderr)
+
+            if csv_path:
+                row = {
+                    "ts": iso(utcnow()),
+                    "source": source,
+                    "post_id": pid,
+                    "author": getattr(getattr(post, "author", None), "name", None),
+                    "flair": flair,
+                    "title": title,
+                    "action": "NO_ACTION",
+                    "category": "VALIDATION_ONLY",
+                    "reason": "Inquiry flair — title validated, matcher skipped",
+                }
+                try:
+                    append_csv(csv_path, row, header_order=list(row.keys()))
+                except Exception as e:
+                    print(f"[LOG][WARN] CSV append failed: {e}", file=sys.stderr)
+
+            # Inquiry zliczamy jako processed (przeszło walidację)
+            decisions_count["NO_ACTION"] = decisions_count.get("NO_ACTION", 0) + 1
+            processed += 1
+            continue
+
+        # 3) Link Request: pełna analiza
+        # Validator
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
 
-        # --- polityka per flair ---
-        import re  # lokalny import; bez zmian w nagłówku pliku
-        flair_norm = (flair or "").strip().lower()
-        # Usuń emoji/symbole, zostaw litery/cyfry/spacje i ampersand (ważny dla "found & shared")
-        flair_norm = re.sub(r"[^a-z0-9&\s]+", "", flair_norm)
-
-        ALLOWED_FOR_MATCH = {"link request"}  # tylko Link Request jest analizowany
-        if flair_norm not in ALLOWED_FOR_MATCH:
-            if flair_norm in {"inquiry", "actor inquiry"}:
-                if validator.get("status") == "MISSING":
-                    print("[POLICY] Inquiry/Actor Inquiry: hard MISSING → rekomendacja remove (RR: Lack of Drama Name...)")
-                else:
-                    print("[POLICY] Inquiry/Actor Inquiry: tylko walidacja; pomijam title/poster matcher.")
-            elif flair_norm in {"found & shared", "request complete"}:
-                print(f"[POLICY] Found/Complete: wynikowy post, pomijam analizę.")
-            else:
-                print(f"[POLICY] Flair '{flair}' (norm='{flair_norm}') nieobsługiwany w matcherach — pomijam.")
-            continue
-
+        # Title Matcher (pełen)
         tmatch = run_title_matcher(post, cfg)
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)

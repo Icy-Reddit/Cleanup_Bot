@@ -15,38 +15,20 @@ import os
 import sys
 import inspect
 import warnings
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Silence noisy warnings on GitHub runners (kept defensive even with pinned deps)
 warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
 
-try:
-    import praw
-except Exception:
-    praw = None
-
-try:
-    import yaml
-except Exception:
-    yaml = None
-
-# Optional local modules (we'll guard calls)
-try:
-    import title_validator
-except Exception:
-    title_validator = None
-try:
-    import title_matcher
-except Exception:
-    title_matcher = None
-try:
-    import decision_engine
-except Exception:
-    decision_engine = None
+# --- deps (importy normalne; moduły są w repo) ---
+import praw
+import yaml
+import title_validator
+import title_matcher
+import decision_engine
 
 
 # ------------------------ Utils ------------------------
-
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -60,22 +42,22 @@ def ensure_dir(path: str) -> None:
 def load_yaml(path: str) -> Dict[str, Any]:
     if not path or not os.path.exists(path):
         return {}
-    if yaml is None:
-        return {}
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def load_state(path: Optional[str]) -> Dict[str, Any]:
-    if not path:
-        return {}
-    if not os.path.exists(path):
-        return {}
+    if not path or not os.path.exists(path):
+        return {"ids": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"ids": {}}
+            data.setdefault("ids", {})
+            return data
     except Exception:
-        return {}
+        return {"ids": {}}
 
 
 def save_state(path: Optional[str], state: Dict[str, Any]) -> None:
@@ -87,19 +69,17 @@ def save_state(path: Optional[str], state: Dict[str, Any]) -> None:
 
 
 # ------------------------ Reddit I/O ------------------------
-
 def make_reddit(cfg: Dict[str, Any]):
-    if praw is None:
-        raise RuntimeError("praw not available")
     section = (cfg.get("praw_section") or "Cleanup_Bot").strip()
-    try:
-        return praw.Reddit(site_name=section)
-    except Exception:
-        # fallback to DEFAULT for local devs
-        return praw.Reddit(site_name="DEFAULT")
+    return praw.Reddit(site_name=section)
 
 
-def fetch_candidates(reddit_obj, window_min: int, sources: str = "both", limit_per_source: int = 200) -> List[Tuple[str, Any]]:
+def fetch_candidates(
+    reddit_obj,
+    window_min: int,
+    sources: str = "both",
+    limit_per_source: int = 200,
+) -> List[Tuple[str, Any]]:
     out: List[Tuple[str, Any]] = []
     sub = reddit_obj.subreddit("CShortDramas")
     min_ts = utcnow() - dt.timedelta(minutes=window_min)
@@ -131,11 +111,7 @@ def fetch_candidates(reddit_obj, window_min: int, sources: str = "both", limit_p
 
 
 # ------------------------ Adapters ------------------------
-
 def run_title_validator(title: str, flair_in: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    if title_validator is None:
-        return {"status": "OK", "reason": "no_validator"}
-
     # Try (title, flair, config) first; then (title, flair); then (title)
     for name in ("validate_title", "validate"):
         if not hasattr(title_validator, name):
@@ -155,24 +131,20 @@ def run_title_validator(title: str, flair_in: str, cfg: Dict[str, Any]) -> Dict[
         except Exception as e:
             print(f"[WARN] title_validator.{name} failed: {e}", file=sys.stderr)
             return {"status": "OK", "reason": "validator_error"}
-
     return {"status": "OK", "reason": "no_validator_fn"}
 
 
 def run_title_matcher(post: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    if title_matcher is None:
-        return {"best": None, "pool_ids": [], "top": []}
-
     for name in ("match_title", "match"):
         if not hasattr(title_matcher, name):
             continue
         fn = getattr(title_matcher, name)
         try:
             params = inspect.signature(fn).parameters
-            kw = {}
+            kw: Dict[str, Any] = {}
             title = getattr(post, "title", None)
             author_obj = getattr(post, "author", None)
-            author_name = getattr(author_obj, "name", None)
+            author_name = getattr(author_obj, "name", None) if author_obj else None
             flair_in = getattr(post, "link_flair_text", None) or ""
             permalink = getattr(post, "permalink", None)
             pid = getattr(post, "id", None)
@@ -195,6 +167,8 @@ def run_title_matcher(post: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 kw["reddit"] = reddit_obj
             if "post_created_utc" in params and created_utc is not None:
                 kw["post_created_utc"] = created_utc
+            if "config" in params:
+                kw["config"] = cfg
 
             rep = fn(**kw)
             return rep or {"best": None, "pool_ids": [], "top": []}
@@ -204,26 +178,22 @@ def run_title_matcher(post: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             print(f"[WARN] title_matcher.{name} failed: {e}", file=sys.stderr)
             continue
-
     return {"best": None, "pool_ids": [], "top": []}
 
 
 def run_decision_engine(context, validator, title_report, poster_report, cfg):
-    if decision_engine is None:
-        # Minimal fallback decision: no actions in live mode without DE
-        return {
-            "action": "NO_ACTION",
-            "category": "NO_SIGNAL",
-            "reason": "no_decision_engine",
-            "links": [],
-        }
-
     for name in ("decide", "decide_action"):
         if not hasattr(decision_engine, name):
             continue
         fn = getattr(decision_engine, name)
         try:
-            rep = fn(context=context, validator=validator, title_match=title_report, poster_match=poster_report, config=cfg)
+            rep = fn(
+                context=context,
+                validator=validator,
+                title_match=title_report,
+                poster_match=poster_report,
+                config=cfg,
+            )
             if not rep:
                 raise ValueError("decision engine returned empty")
             return rep
@@ -233,8 +203,6 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
         except Exception as e:
             print(f"[WARN] decision_engine.{name} failed: {e}", file=sys.stderr)
             break
-
-    # Fallback
     return {
         "action": "NO_ACTION",
         "category": "NO_SIGNAL",
@@ -244,7 +212,6 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
 
 
 # ------------------------ Pretty printing ------------------------
-
 def print_human_post(source: str, post: Any, body_preview: Optional[str] = None) -> None:
     created = dt.datetime.fromtimestamp(getattr(post, "created_utc", 0.0), tz=dt.timezone.utc).isoformat()
     author = f"u/{getattr(getattr(post, 'author', None), 'name', 'unknown')}"
@@ -313,7 +280,6 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: D
 
 
 # ------------------------ Main ------------------------
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
@@ -326,7 +292,7 @@ def main() -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--report-jsonl", default=None)
     ap.add_argument("--report-csv", default=None)
-    # Backward compatibility with older workflows
+    # Backward-compat flags:
     ap.add_argument("--log-jsonl", dest="report_jsonl")
     ap.add_argument("--log-csv", dest="report_csv")
     ap.add_argument("--state-file", default=os.path.join("cache", "state.json"))
@@ -335,17 +301,16 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
-
-    global reddit_obj
     reddit_obj = make_reddit(cfg)
 
-    posts = fetch_candidates(reddit_obj, args.window, sources=args.sources, limit_per_source=args.limit_per_source)
+    posts = fetch_candidates(
+        reddit_obj, args.window, sources=args.sources, limit_per_source=args.limit_per_source
+    )
     posts.sort(key=lambda t: getattr(t[1], "created_utc", 0.0))
 
     # State handling
     state = load_state(args.state_file)
     ttl = dt.timedelta(minutes=max(1, args.state_ttl_min))
-    now_ts = utcnow().timestamp()
 
     # GC old entries
     seen = state.setdefault("ids", {})
@@ -378,6 +343,7 @@ def main() -> int:
         if not pid:
             continue
 
+        # Skip by state
         if args.state_file:
             seen = state.setdefault("ids", {})
             if pid in seen:
@@ -387,33 +353,42 @@ def main() -> int:
                 continue
             seen[pid] = utcnow().timestamp()
 
+        # Basic fields
+        flair = getattr(post, "link_flair_text", None) or ""
         title = getattr(post, "title", "") or ""
         selftext = getattr(post, "selftext", "") or ""
         preview = (selftext or "")[:160].replace("\n", " ").strip()
-        flair = getattr(post, "link_flair_text", None) or ""
 
-        # --- POLICY GATE (before any printing/validation) ---
+        # --- HARD POLICY GATE: Only analyze Link Request (from /new and modqueue) ---
         flair_norm = (flair or "").strip().lower()
         if flair_norm != "link request":
             if args.verbose:
-                print(f"[POLICY] Skip non-Link Request: {flair} (norm='{flair_norm}')")
+                if flair_norm in {"found & shared", "request complete"}:
+                    print(f"[POLICY] Skip result post: {flair}")
+                elif flair_norm in {"inquiry", "actor inquiry"}:
+                    print(f"[POLICY] Skip inquiry: {flair}")
+                else:
+                    print(f"[POLICY] Skip unsupported flair: {flair} (norm='{flair_norm}')")
             continue
 
+        # Human print for Link Request only
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 
+        # Validate title
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
 
-                tmatch = run_title_matcher(post, cfg)
+        # Title matcher
+        tmatch = run_title_matcher(post, cfg)
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
             print(f"[TM] best score={score} certainty={cert} rel={rel}")
             if t_title != "(unknown)":
                 print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
-        # Poster is disabled — keep a neutral stub that DE accepts
+        # Poster is disabled — keep a neutral stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
 
         context = {
@@ -447,15 +422,15 @@ def main() -> int:
         except Exception as e:
             print(f"[WARN] failed to write JSONL: {e}", file=sys.stderr)
 
-        # Log CSV (only in live display mode)
+        # Log CSV (only when live)
         if csv_path:
             try:
                 fresh = not os.path.exists(csv_path)
                 with open(csv_path, "a", newline="", encoding="utf-8") as cf:
                     wr = csv.writer(cf)
                     if fresh:
-                        wr.writerow(["when", "post_id", "source", "flair", "action", "category", "reason", "score", "certainty", "relation"]) 
-                    tt, s, c, r, _ = summarize_title_matcher(tmatch)
+                        wr.writerow(["when", "post_id", "source", "flair", "action", "category", "reason", "score", "certainty", "relation"])
+                    _, s, c, r, _ = summarize_title_matcher(tmatch)
                     wr.writerow([utcnow().isoformat(), pid, source, flair, decision.get("action"), decision.get("category"), decision.get("reason"), s, c, r])
             except Exception as e:
                 print(f"[WARN] failed to write CSV: {e}", file=sys.stderr)
@@ -463,11 +438,9 @@ def main() -> int:
         processed += 1
 
     save_state(args.state_file, state)
-
     print("\n[SUMMARY] total={} processed={} skipped_due_to_state={} decisions={}".format(
         len(posts), processed, skipped, decisions_count
     ))
-
     return 0
 
 

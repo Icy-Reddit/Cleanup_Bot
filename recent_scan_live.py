@@ -389,8 +389,7 @@ def main() -> int:
 
         title = getattr(post, "title", "") or ""
         selftext = getattr(post, "selftext", "") or ""
-        preview = (selftext or "")[:160].replace("
-", " ").strip()
+        preview = (selftext or "")[:160].replace("\n", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
 
         # --- POLICY GATE (before any printing/validation) ---

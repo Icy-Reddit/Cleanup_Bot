@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # recent_scan_live.py — live scanner for r/CShortDramas
-# - Scans last N minutes from /new + modqueue
+# - Scans last N minutes from /new + modqueue (posts only)
 # - Skips already processed posts via --state-file
 # - Logs to JSONL/CSV (optional)
 # - Poster matcher is disabled (reported as NO_REPORT)
@@ -23,6 +23,7 @@ from dataclasses import asdict, is_dataclass
 try:
     import yaml
     import praw
+    from praw.models import Submission  # <— ważne: filtrujemy modqueue do postów
 except Exception as e:
     print("[FATAL] Missing deps:", e, file=sys.stderr)
     sys.exit(1)
@@ -130,22 +131,28 @@ def fetch_candidates(
             return False
         return ts >= min_ts
 
+    # /new → zawsze zwraca Submission, dodatkowo filtrujemy po oknie czasowym
     if sources in ("new", "both"):
         try:
             for s in sub.new(limit=limit_per_source):
-                if ok(getattr(s, "created_utc", 0.0)):
+                if isinstance(s, Submission) and ok(getattr(s, "created_utc", 0.0)):
                     out.append(("new", s))
         except Exception as e:
             print(f"[WARN] Failed to fetch /new: {e}", file=sys.stderr)
 
+    # modqueue → MOŻE zawierać Comments/Reports; tu bierzemy tylko Submission
     if sources in ("modqueue", "both"):
         try:
             for s in sub.mod.modqueue(limit=limit_per_source):
-                if getattr(s, "created_utc", None) and ok(s.created_utc):
-                    out.append(("modqueue", s))
+                # tylko posty + w oknie czasu
+                if isinstance(s, Submission):
+                    cu = getattr(s, "created_utc", None)
+                    if cu and ok(cu):
+                        out.append(("modqueue", s))
         except Exception as e:
             print(f"[WARN] Failed to fetch modqueue: {e}", file=sys.stderr)
 
+    # rosnąco po czasie (najstarsze → najnowsze); i tak ogranicza nas okno czasu
     out.sort(key=lambda it: getattr(it[1], "created_utc", 0.0))
     return out
 
@@ -164,7 +171,7 @@ def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
         except Exception as e:
             return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
 
-    # Fallback heuristic (very permissive)
+    # Fallback heuristic (bardzo łagodna)
     if not title or len(title.split()) < 3:
         return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
     return {"status": "OK", "reason": "title_candidate"}
@@ -400,8 +407,10 @@ def main() -> int:
 
     jsonl_path = None
     if args.log_jsonl is not None:
-        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.log_jsonl
-        ensure_dir(jsonl_path)
+        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.logl_jsonl  # noqa: typo safeguard
+        # poprawka: gdy ktoś poda pusty argument, użyjemy domyślnej ścieżki
+        if not os.path.exists(os.path.dirname(jsonl_path)):
+            ensure_dir(jsonl_path)
 
     csv_path = None
     if args.report_csv is not None:
@@ -432,7 +441,7 @@ def main() -> int:
         preview = (selftext or "")[:160].replace("\n", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
 
-        # Print the post header early if live
+        # Podgląd nagłówka posta
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 
@@ -442,7 +451,6 @@ def main() -> int:
             if args.live or args.verbose:
                 reason = "Found&Shared/RequestComplete" if flair in FLAIR_SKIP else "non-target flair"
                 print(f"[SKIP] flair={flair or '(none)'} | reason={reason}")
-            # Do not count as processed; just continue
             continue
 
         # 2) Inquiry-only: validate title, no matcher, no decision engine
@@ -451,18 +459,14 @@ def main() -> int:
             if args.live:
                 print_validator(validator)
                 print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
-            # Log a lightweight NO_ACTION row so mamy ślad w raportach
+
             if jsonl_path:
                 payload = {
                     "ts": iso(utcnow()),
                     "source": source,
                     "post_id": pid,
                     "context": {"author": getattr(getattr(post, "author", None), "name", None), "flair": flair, "title": title},
-                    "decision": {
-                        "action": "NO_ACTION",
-                        "category": "VALIDATION_ONLY",
-                        "reason": "Inquiry flair — title validated, matcher skipped",
-                    },
+                    "decision": {"action": "NO_ACTION", "category": "VALIDATION_ONLY", "reason": "Inquiry flair — title validated, matcher skipped"},
                 }
                 try:
                     append_jsonl(jsonl_path, payload)
@@ -486,18 +490,15 @@ def main() -> int:
                 except Exception as e:
                     print(f"[LOG][WARN] CSV append failed: {e}", file=sys.stderr)
 
-            # Inquiry zliczamy jako processed (przeszło walidację)
-            decisions_count["NO_ACTION"] = decisions_count.get("NO_ACTION", 0) + 1
             processed += 1
+            decisions_count["NO_ACTION"] = decisions_count.get("NO_ACTION", 0) + 1
             continue
 
         # 3) Link Request: pełna analiza
-        # Validator
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
 
-        # Title Matcher (pełen)
         tmatch = run_title_matcher(post, cfg)
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
@@ -505,7 +506,7 @@ def main() -> int:
             if t_title != "(unknown)":
                 print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
-        # Poster is disabled — keep a neutral stub that DE accepts
+        # Poster is disabled — keep a neutral stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
 
         context = {

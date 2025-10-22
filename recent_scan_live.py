@@ -407,7 +407,7 @@ def main() -> int:
 
     jsonl_path = None
     if args.log_jsonl is not None:
-        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.logl_jsonl  # noqa: typo safeguard
+        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.log_jsonl  # noqa: typo safeguard
         # poprawka: gdy ktoś poda pusty argument, użyjemy domyślnej ścieżki
         if not os.path.exists(os.path.dirname(jsonl_path)):
             ensure_dir(jsonl_path)

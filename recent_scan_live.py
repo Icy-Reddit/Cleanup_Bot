@@ -438,9 +438,12 @@ def main() -> int:
             print_validator(validator)
 
         # --- polityka per flair ---
+        import re  # lokalny import; bez zmian w nagłówku pliku
         flair_norm = (flair or "").strip().lower()
-        ALLOWED_FOR_MATCH = {"link request"}  # tylko Link Request jest analizowany
+        # Usuń emoji/symbole, zostaw litery/cyfry/spacje i ampersand (ważny dla "found & shared")
+        flair_norm = re.sub(r"[^a-z0-9&\s]+", "", flair_norm)
 
+        ALLOWED_FOR_MATCH = {"link request"}  # tylko Link Request jest analizowany
         if flair_norm not in ALLOWED_FOR_MATCH:
             if flair_norm in {"inquiry", "actor inquiry"}:
                 if validator.get("status") == "MISSING":

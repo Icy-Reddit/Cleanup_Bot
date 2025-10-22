@@ -46,6 +46,19 @@ def validate_title(title: str, flair: str, config: Dict[str, Any]) -> Dict[str, 
     toks_nostop = _tokens_no_stop(t_norm)
     has_cjk = _has_cjk(t_norm)
 
+def _rescue_title_from_url(raw_title: str) -> str | None:
+    # znajdź URL, pobierz path, weź ostatni niepusty segment
+    # unquote + replace ['_', '-'] -> ' '
+    # strip + collapse whitespace
+    # jeśli >= 2 słowa zawierające litery -> zwróć string; inaczej None
+
+title = normalize(raw_title)
+if looks_empty(title):
+    rescued = _rescue_title_from_url(raw_title)
+    if rescued and looks_like_title(rescued):
+        title = rescued  # użyj „odratowanego” tytułu zamiast oceniać jako MISSING
+
+    
     # NOWE: jeśli wygląda jak krótki, poprawny tytuł — akceptuj
     if _looks_like_title(t):
         return {"status": "OK", "reason": "title_candidate", "notes": ["looks_like_title"]}

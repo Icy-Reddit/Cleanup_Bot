@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # recent_scan_live.py — live scanner for r/CShortDramas
-# - Scans last N minutes from /new + modqueue
-# - Skips already processed posts via --state-file
-# - Logs to JSONL/CSV (optional)
-# - Poster matcher is disabled (reported as NO_REPORT)
-# - Adapter-aware calls to title_validator / title_matcher / decision_engine
+# Now with optional execution of moderation actions (via action_executor).
 
 from __future__ import annotations
+import warnings
+warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
+
 import argparse
 import csv
 import datetime as dt
@@ -14,9 +13,6 @@ import json
 import os
 import sys
 import inspect
-import warnings
-warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
-
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import asdict, is_dataclass
 
@@ -27,7 +23,7 @@ except Exception as e:
     print("[FATAL] Missing deps:", e, file=sys.stderr)
     sys.exit(1)
 
-# Optional imports (modules from the repo)
+# Local modules
 try:
     import title_validator
 except Exception:
@@ -40,6 +36,10 @@ try:
     import decision_engine
 except Exception:
     decision_engine = None
+try:
+    import action_executor
+except Exception:
+    action_executor = None
 
 
 # ------------------------ Utils ------------------------
@@ -57,11 +57,10 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 def get_reddit():
-    # Standardize on the Cleanup_Bot section (actions write praw.ini accordingly)
+    # Standard: use Cleanup_Bot section (written in workflow)
     try:
         return praw.Reddit("Cleanup_Bot")
     except Exception:
-        # Fallback to DEFAULT if local dev uses that
         return praw.Reddit("DEFAULT")
 
 def ensure_dir(p: str):
@@ -85,12 +84,12 @@ def append_csv(path: str, row: Dict[str, Any], header_order: Optional[List[str]]
 
 def load_state(path: Optional[str]) -> Dict[str, Any]:
     if not path or not os.path.exists(path):
-        return {"ids": {}}
+        return {"ids": {}, "acted": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"ids": {}}
+        return {"ids": {}, "acted": {}}
 
 def save_state(path: Optional[str], state: Dict[str, Any]):
     if not path:
@@ -107,6 +106,7 @@ def gc_state(state: Dict[str, Any], ttl_min: int):
     for pid in [pid for pid, ts in ids.items() if ts < cutoff]:
         ids.pop(pid, None)
     state["ids"] = ids
+    # keep 'acted' without TTL (idempotent safety)
 
 
 # ------------------------ Fetching ------------------------
@@ -164,7 +164,7 @@ def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
         except Exception as e:
             return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
 
-    # Fallback heuristic (very permissive)
+    # Fallback heuristic (permissive)
     if not title or len(title.split()) < 3:
         return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
     return {"status": "OK", "reason": "title_candidate"}
@@ -234,7 +234,6 @@ def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
     return {"best": None, "pool_ids": [], "top": []}
 
 def run_decision_engine(context, validator, title_report, poster_report, cfg):
-    # Pass through to decision_engine.decide if present; never raise.
     if decision_engine and hasattr(decision_engine, "decide"):
         try:
             rep = decision_engine.decide(
@@ -258,7 +257,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
                 "links": [],
             }
 
-    # Fallback minimalist logic (should rarely be used)
+    # Fallback minimal
     status = validator.get("status", "OK")
     if status == "MISSING":
         return {
@@ -379,6 +378,11 @@ def main() -> int:
     ap.add_argument("--state-ttl-min", type=int, default=180)
     ap.add_argument("--subreddit", default="CShortDramas")
     ap.add_argument("--verbose", action="store_true")
+
+    # NEW: execution mode
+    ap.add_argument("--execute", choices=("off", "plan", "live"), default="off",
+                    help="off=read-only, plan=print planned actions, live=execute moderation actions")
+
     args = ap.parse_args()
 
     try:
@@ -441,7 +445,6 @@ def main() -> int:
             if t_title != "(unknown)":
                 print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
-        # Poster is disabled — keep a neutral stub that DE accepts
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
 
         context = {
@@ -458,6 +461,34 @@ def main() -> int:
         if args.live:
             print_decision(decision, tmatch, poster_rep)
 
+        # --------- NEW: Execution layer ---------
+        exec_report = None
+        if args.execute in ("plan", "live") and action_executor:
+            dry = (args.execute == "plan")
+            try:
+                # Avoid double acting on same post across runs
+                acted = state.setdefault("acted", {})
+                if decision.get("action") == "AUTO_REMOVE":
+                    if acted.get(pid):
+                        exec_report = {"post_id": pid, "performed": False, "details": "already executed earlier"}
+                    else:
+                        exec_report = action_executor.execute_decision(
+                            reddit=r,
+                            decision=decision,
+                            context=context,
+                            config=cfg,
+                            dry_run=dry,
+                        )
+                        if exec_report.get("performed"):
+                            acted[pid] = iso(utcnow())
+                else:
+                    exec_report = {"post_id": pid, "performed": False, "details": "non-destructive decision"}
+            except Exception as e:
+                exec_report = {"post_id": pid, "performed": False, "details": f"executor_error: {e}"}
+
+            if args.live:
+                print(f"[EXEC] {exec_report}")
+
         if jsonl_path:
             payload = {
                 "ts": iso(utcnow()),
@@ -465,6 +496,7 @@ def main() -> int:
                 "post_id": pid,
                 "context": {"author": context["author"], "flair": flair, "title": title},
                 "decision": decision,
+                "execution": exec_report,
             }
             try:
                 append_jsonl(jsonl_path, payload)
@@ -482,6 +514,7 @@ def main() -> int:
                 "action": decision.get("action"),
                 "category": decision.get("category"),
                 "reason": decision.get("reason"),
+                "executed": (exec_report or {}).get("performed") if exec_report else False,
             }
             try:
                 append_csv(csv_path, row, header_order=list(row.keys()))

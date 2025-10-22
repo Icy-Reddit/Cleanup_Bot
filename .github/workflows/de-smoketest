@@ -1,0 +1,57 @@
+name: Decision Engine Smoketest
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "Który scenariusz uruchomić"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - missing
+          - repeated
+          - duplicate
+          - borderline
+          - nosignal
+      print_json:
+        description: "Drukuj pełny DecisionReport JSON"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: de-smoketest
+  cancel-in-progress: true
+
+jobs:
+  smoketest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps (pyyaml only)
+        run: |
+          python -m pip install -U pip
+          pip install pyyaml
+
+      - name: Run smoketests
+        run: |
+          EXTRA=""
+          if [ "${{ github.event.inputs.print_json }}" = "true" ]; then
+            EXTRA="--print-json"
+          fi
+          echo "Running case='${{ github.event.inputs.case }}' ${EXTRA}"
+          python de_smoketest.py --case "${{ github.event.inputs.case }}" $EXTRA

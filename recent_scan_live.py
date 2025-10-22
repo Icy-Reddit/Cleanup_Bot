@@ -194,7 +194,9 @@ def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
     return {"status": "OK", "reason": "title_candidate"}
 
 def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
-    """Call into title_matcher using only safe kwargs that match its signature."""
+    """Call into title_matcher using only safe kwargs that match its signature.
+    Now also supports matchers that require keyword-only args like `title_raw` and `author_name`.
+    """
     if not title_matcher:
         return {"best": None, "pool_ids": [], "top": []}
 
@@ -206,19 +208,45 @@ def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
     if callable(fn2):
         try_order.append(("match_title", fn2))
 
+    # Gather common context once
+    author_obj = getattr(post, "author", None)
+    author_name = getattr(author_obj, "name", None)
+    flair_in = getattr(post, "link_flair_text", None) or ""
+    permalink = getattr(post, "permalink", None)
+    pid = getattr(post, "id", None)
+    title_raw = getattr(post, "title", None)
+    subreddit = getattr(getattr(post, "subreddit", None), "display_name", None)
+    created_utc = getattr(post, "created_utc", None)
+    reddit_obj = getattr(post, "_reddit", None)
+
     for name, fn in try_order:
         try:
-            params = set(getattr(fn, "__code__", None).co_varnames if getattr(fn, "__code__", None) else [])
+            code = getattr(fn, "__code__", None)
+            params = set(code.co_varnames[:code.co_argcount]) if code else set()
             kw = {}
+            # Core expected params
             if "post" in params:
                 kw["post"] = post
             if "config" in params:
                 kw["config"] = cfg
             if "exclude_post_id" in params:
-                kw["exclude_post_id"] = getattr(post, "id", None)
+                kw["exclude_post_id"] = pid
             if "exclude_post_url" in params:
-                kw["exclude_post_url"] = getattr(post, "permalink", None)
-            # IMPORTANT: do NOT pass unsupported kwargs like "pool", "fetch_per_flair"
+                kw["exclude_post_url"] = permalink
+            # Extra keyword-only style params (some implementations require these)
+            if "title_raw" in params and title_raw is not None:
+                kw["title_raw"] = title_raw
+            if "author_name" in params and author_name is not None:
+                kw["author_name"] = author_name
+            if "flair_in" in params:
+                kw["flair_in"] = flair_in
+            if "subreddit" in params and subreddit is not None:
+                kw["subreddit"] = subreddit
+            if "reddit" in params and reddit_obj is not None:
+                kw["reddit"] = reddit_obj
+            if "post_created_utc" in params and created_utc is not None:
+                kw["post_created_utc"] = created_utc
+
             rep = fn(**kw)
             return rep or {"best": None, "pool_ids": [], "top": []}
         except TypeError as e:

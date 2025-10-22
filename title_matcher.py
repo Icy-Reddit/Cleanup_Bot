@@ -1,151 +1,302 @@
 # title_matcher.py
+# r/CShortDramas — Title Matcher (text only)
+#
+# - Robust to call from recent_scan_live.py adapters:
+#   * match_title_for_post(post, config=None, **kwargs)
+#   * match_title(title_raw=..., author_name=..., subreddit=..., reddit=..., config=None, **kwargs)
+# - CJK-safe normalization + normalized-exact short-circuit
+# - Fuzzy on normalized strings (rapidfuzz.token_set_ratio)
+# - Candidate pool from recent subreddit posts with flairs:
+#     📌 Link Request, 🔗 Found & Shared, ✅ Request Complete
+# - Thresholds read from config.yaml (fallbacks if missing)
+# - Returns a stable report: {"best": {...} or None, "top": [...], "pool_ids": [...]}
+
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
+
+import unicodedata
 import re
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
-import praw
-from rapidfuzz import fuzz
+try:
+    from rapidfuzz import fuzz
+except Exception:  # pragma: no cover
+    # minimal fallback (very rarely used; strongly recommend rapidfuzz)
+    def _ratio(a: str, b: str) -> int:
+        # simple normalized Levenshtein-ish ratio placeholder
+        if not a and not b:
+            return 100
+        if not a or not b:
+            return 0
+        # naive token-set overlap
+        sa, sb = set(a.split()), set(b.split())
+        if not sa or not sb:
+            return 0
+        return int(100 * len(sa & sb) / max(1, len(sa | sb)))
+    class fuzz:
+        token_set_ratio = staticmethod(_ratio)
 
-# Szersza lista „pustych” słów, które nie wnoszą informacji o dramie
-STOPWORDS = {
-    "title","link","pls","please","help","drama","name",
-    "find","looking","for","this","that","the","a","an",
-    "anyone","can","need","someone","pls","plz","me","my",
+# ---------- Config helpers ----------
+
+_DEFAULTS = {
+    "decision": {
+        "title_threshold_auto": 93,
+        "title_threshold_border": 85,
+        "time_window_days": 14,
+    }
 }
 
-_CJK_OR_LATIN_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9FFF\s]+")
-_MULTISPACE_RE = re.compile(r"\s+")
-_EMOJI_OR_SYMBOLS_RE = re.compile(r"[\u2600-\u27BF\U0001F300-\U0001FAFF]")
+FLAIRS_DEFAULT = [
+    "📌 Link Request",
+    "🔗 Found & Shared",
+    "✅ Request Complete",
+]
 
-def normalize_title(text: str) -> str:
-    """Lowercase, usuń emoji/symbole, zostaw łacińskie + CJK, usuń stopwordy, znormalizuj spacje."""
-    t = (text or "").lower()
-    t = _EMOJI_OR_SYMBOLS_RE.sub(" ", t)
-    t = _CJK_OR_LATIN_RE.sub(" ", t)
-    t = _MULTISPACE_RE.sub(" ", t).strip()
-    toks = [w for w in t.split() if w and w not in STOPWORDS]
-    return " ".join(toks)
+def _get(cfg: Optional[dict], path: str, default: Any) -> Any:
+    cur = cfg or {}
+    for k in path.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
-def token_stats(norm_text: str) -> dict:
-    has_cjk = bool(re.search(r"[\u4e00-\u9FFF]", norm_text))
-    toks = [w for w in (norm_text.split() if norm_text else []) if w]
-    return {"tokens": toks, "n": len(toks), "has_cjk": has_cjk, "chars": len(norm_text)}
+def _thresholds(cfg: Optional[dict]) -> Tuple[int, int]:
+    auto_t = int(_get(cfg, "decision.title_threshold_auto", _DEFAULTS["decision"]["title_threshold_auto"]))
+    border_t = int(_get(cfg, "decision.title_threshold_border", _DEFAULTS["decision"]["title_threshold_border"]))
+    return auto_t, border_t
 
-def is_uninformative(stats: dict) -> bool:
-    # bardzo krótki i bez CJK → nieinformatywny
-    return (stats["n"] < 2) and (not stats["has_cjk"]) and (stats["chars"] < 8)
+def _time_window_days(cfg: Optional[dict]) -> int:
+    return int(_get(cfg, "decision.time_window_days", _DEFAULTS["decision"]["time_window_days"]))
 
-def safe_score(a_norm: str, b_norm: str, a_stats: dict, b_stats: dict) -> int:
+def _flairs(cfg: Optional[dict]) -> List[str]:
+    # możesz dodać do config.yaml sekcję matcher.flairs jeśli chcesz
+    fl = _get(cfg, "matcher.flairs", None)
+    if isinstance(fl, list) and fl:
+        return fl
+    return FLAIRS_DEFAULT[:]
+
+# ---------- Normalization (CJK-safe) ----------
+
+_PUNCT_CATS = {"Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps"}
+
+def _normalize_title(s: str) -> str:
     """
-    Bezpieczne liczenie podobieństwa:
-    - jeśli któryś tytuł ma ≤2 tokeny → cap wynik na 85 (żeby nie wchodził w progi 'certain'),
-    - w pozostałych wypadkach bierz maksimum z kilku metryk.
+    NFKC + casefold → drop Unicode punctuation → collapse whitespace.
+    Leaves CJK letters/digits intact.
     """
-    if a_stats["n"] <= 2 or b_stats["n"] <= 2:
-        s1 = fuzz.ratio(a_norm, b_norm)
-        s2 = fuzz.partial_ratio(a_norm, b_norm)
-        return min(max(s1, s2), 85)
-    return max(
-        fuzz.ratio(a_norm, b_norm),
-        fuzz.token_sort_ratio(a_norm, b_norm),
-        fuzz.token_set_ratio(a_norm, b_norm),
-    )
-
-def normalize_flair(text: Optional[str]) -> str:
-    if not text:
+    if not s:
         return ""
-    t = _EMOJI_OR_SYMBOLS_RE.sub(" ", text)
-    t = re.sub(r"[^\w\s&]+", " ", t)
-    t = t.strip().lower()
-    t = _MULTISPACE_RE.sub(" ", t)
-    return t
+    s = unicodedata.normalize("NFKC", s).casefold()
+    s = "".join(ch if unicodedata.category(ch) not in _PUNCT_CATS else " " for ch in s)
+    s = re.sub(r"\s+", " ", s, flags=re.UNICODE).strip()
+    return s
 
-def _subreddit(cfg: Dict[str, Any]):
-    praw_site = (cfg.get("reddit", {}) or {}).get("praw_site") or "Cleanup_Bot"
-    sub_name  = (cfg.get("reddit", {}) or {}).get("subreddit") or "CShortDramas"
-    r = praw.Reddit(praw_site)
-    return r.subreddit(sub_name)
+# ---------- Candidate building ----------
 
-def _fetch_pool(cfg: Dict[str, Any], limit_per_flair: int, compare_flairs: List[str]) -> Tuple[List[Any], Dict[str, int]]:
-    s = _subreddit(cfg)
-    want = {normalize_flair(x) for x in (compare_flairs or [])}
-    per_flair_count: Dict[str, int] = {normalize_flair(x): 0 for x in (compare_flairs or [])}
-    pool = []
-    # prosto: weź spory bufor z /new, przefiltruj po flarach
-    for p in s.new(limit=limit_per_flair * max(1, len(want))):
-        f_norm = normalize_flair(getattr(p, "link_flair_text", None))
-        if f_norm in want:
-            pool.append(p)
-            per_flair_count[f_norm] = per_flair_count.get(f_norm, 0) + 1
-    return pool, per_flair_count
+def _utc_now() -> float:
+    return time.time()
 
-def _post_to_candidate(p, author_name_query: str) -> Dict[str, Any]:
-    flair = getattr(p, "link_flair_text", None) or ""
-    author = getattr(p.author, "name", "[deleted]") if p.author else "[deleted]"
-    rel = "same_author" if author.lower() == (author_name_query or "").lower() else "different_author"
+def _fetch_recent_candidates(
+    reddit: Any,
+    subreddit_name: str,
+    window_days: int,
+    limit_per_source: int = 200,
+    flairs: Optional[List[str]] = None,
+    exclude_post_id: Optional[str] = None,
+    exclude_post_url: Optional[str] = None,
+) -> List[Any]:
+    """
+    Build a recent candidate pool from subreddit, filtered by time window and flair.
+    Uses /new() only — najprostsze i wystarczające (modqueue pobierasz gdzie indziej).
+    """
+    flairs = flairs or _flairs(None)
+    out: List[Any] = []
+    try:
+        sub = reddit.subreddit(subreddit_name)
+        now = _utc_now()
+        min_ts = now - window_days * 86400
+        for s in sub.new(limit=limit_per_source):
+            try:
+                # time filter
+                if getattr(s, "created_utc", 0.0) < min_ts:
+                    continue
+                # flair filter (string match on link_flair_text)
+                lf = getattr(s, "link_flair_text", None) or ""
+                if lf not in flairs:
+                    continue
+                # exclude current post
+                if exclude_post_id and getattr(s, "id", None) == exclude_post_id:
+                    continue
+                if exclude_post_url and getattr(s, "permalink", None) == exclude_post_url:
+                    continue
+                out.append(s)
+            except Exception:
+                continue
+    except Exception:
+        # reddit or network error — return whatever we have (likely empty)
+        return out
+    return out
+
+# ---------- Scoring ----------
+
+def _relation(author_a: Optional[str], author_b: Optional[str]) -> str:
+    if not author_a or not author_b:
+        return "unknown"
+    return "same_author" if author_a.casefold() == author_b.casefold() else "different_author"
+
+def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
+    """
+    Returns (score, match_type). match_type in {"normalized_exact", "fuzzy"}.
+    """
+    if q_norm and c_norm and q_norm == c_norm:
+        return 100, "normalized_exact"
+    return int(fuzz.token_set_ratio(q_norm, c_norm)), "fuzzy"
+
+def _certainty(score: int, auto_t: int, border_t: int) -> str:
+    if score >= auto_t:
+        return "certain"
+    if score >= border_t:
+        return "borderline"
+    return "low"
+
+# ---------- Report builders ----------
+
+def _candidate_info(s: Any) -> Dict[str, Any]:
+    author_name = None
+    try:
+        author_name = getattr(getattr(s, "author", None), "name", None)
+    except Exception:
+        author_name = None
     return {
-        "post_id": p.id,
-        "title_raw": p.title or "",
-        "permalink": f"https://www.reddit.com{p.permalink}",
-        "created_utc": int(p.created_utc),
-        "flair": flair,
-        "author": f"u/{author}",
-        "relation": rel,
+        "title": getattr(s, "title", None),
+        "permalink": getattr(s, "permalink", None),
+        "flair": getattr(s, "link_flair_text", None),
+        "author": f"u/{author_name}" if author_name else None,
     }
+
+def _make_entry(
+    score: int,
+    certainty: str,
+    rel: str,
+    match_type: str,
+    cand: Any,
+) -> Dict[str, Any]:
+    ent = {
+        "score": int(score),
+        "certainty": certainty,
+        "relation": rel,
+        "type": match_type,
+        "candidate": _candidate_info(cand),
+    }
+    return ent
+
+def _empty_report() -> Dict[str, Any]:
+    return {"best": None, "top": [], "pool_ids": []}
+
+# ---------- Public API ----------
+
+def match_title_for_post(
+    post: Any,
+    config: Optional[dict] = None,
+    *,
+    exclude_post_id: Optional[str] = None,
+    exclude_post_url: Optional[str] = None,
+    fetch_per_flair: Optional[int] = None,  # kept for forward-compat; not strictly used here
+) -> Dict[str, Any]:
+    """
+    Primary entry (used by our scanner when 'post' obiekt jest dostępny).
+    """
+    if not post:
+        return _empty_report()
+
+    title_raw = getattr(post, "title", "") or ""
+    reddit = getattr(post, "_reddit", None)
+    subreddit = getattr(getattr(post, "subreddit", None), "display_name", None)
+    author_name = getattr(getattr(post, "author", None), "name", None)
+
+    return match_title(
+        title_raw=title_raw,
+        author_name=author_name,
+        subreddit=subreddit,
+        reddit=reddit,
+        config=config,
+        exclude_post_id=exclude_post_id or getattr(post, "id", None),
+        exclude_post_url=exclude_post_url or getattr(post, "permalink", None),
+    )
 
 def match_title(
     *,
-    title_raw: str,
-    author_name: str,
-    config: Dict[str, Any],
-    max_candidates: int = 10,
-    fetch_limit_per_flair: int = 200,
-    exclude_post_ids: Optional[List[str]] = None,
+    title_raw: Optional[str] = None,
+    author_name: Optional[str] = None,
+    subreddit: Optional[str] = None,
+    reddit: Optional[Any] = None,
+    config: Optional[dict] = None,
+    exclude_post_id: Optional[str] = None,
+    exclude_post_url: Optional[str] = None,
+    flair_in: Optional[str] = None,       # accepted, may be unused
+    post_created_utc: Optional[float] = None,  # accepted, may be unused
+    fetch_per_flair: Optional[int] = None,     # accepted, may be unused
 ) -> Dict[str, Any]:
-    exclude = set(exclude_post_ids or [])
-    thr_certain = int((config.get("decision", {}) or {}).get("title_threshold_auto", 93))
-    thr_border  = int((config.get("decision", {}) or {}).get("title_threshold_border", 85))
+    """
+    General entry (adapter-friendly). Works even if some context is missing.
+    """
+    if not title_raw or not subreddit or not reddit:
+        # Not enough info to match — return empty report
+        return _empty_report()
 
-    q_norm = normalize_title(title_raw)
-    q_stats = token_stats(q_norm)
+    auto_t, border_t = _thresholds(config)
+    window_days = _time_window_days(config)
+    flairs = _flairs(config)
 
-    compare_flairs = (config.get("flairs", {}) or {}).get("compare_against") or ["Link Request", "Found & Shared", "Request Complete"]
-    pool, per_flair = _fetch_pool(config, fetch_limit_per_flair, compare_flairs)
+    query_norm = _normalize_title(title_raw)
+    if not query_norm:
+        return _empty_report()
 
-    candidates: List[Dict[str, Any]] = []
-    for p in pool:
-        if getattr(p, "id", None) in exclude:
+    # Build pool
+    pool = _fetch_recent_candidates(
+        reddit=reddit,
+        subreddit_name=subreddit,
+        window_days=window_days,
+        limit_per_source=200,
+        flairs=flairs,
+        exclude_post_id=exclude_post_id,
+        exclude_post_url=exclude_post_url,
+    )
+
+    scored: List[Tuple[int, str, Any, str]] = []  # (score, rel, cand, match_type)
+    for cand in pool:
+        try:
+            cand_title = getattr(cand, "title", None) or ""
+            cand_norm = _normalize_title(cand_title)
+            score, mtype = _score_pair(query_norm, cand_norm)
+            rel = _relation(author_name, getattr(getattr(cand, "author", None), "name", None))
+            scored.append((int(score), rel, cand, mtype))
+        except Exception:
             continue
-        c = _post_to_candidate(p, author_name_query=author_name)
-        c_norm = normalize_title(c["title_raw"])
-        c_stats = token_stats(c_norm)
-        if is_uninformative(q_stats) or is_uninformative(c_stats):
-            continue
-        score = safe_score(q_norm, c_norm, q_stats, c_stats)
-        # UWAGA: exact TYLKO przy identycznych normach (nigdy na „score==100”)
-        match_type = "exact" if (q_norm and q_norm == c_norm) else "fuzzy"
-        certainty = "certain" if score >= thr_certain else ("borderline" if score >= thr_border else "low")
-        c.update({
-            "title_norm": c_norm,
-            "norm_token_count": c_stats["n"],
-            "score": int(score),
-            "match_type": match_type,
-            "certainty": certainty,
-        })
-        candidates.append(c)
 
-    candidates.sort(key=lambda x: (x["score"], x["created_utc"]), reverse=True)
-    best = candidates[0] if candidates else None
+    if not scored:
+        return _empty_report()
 
-    report = {
-        "title_norm": q_norm,
-        "thresholds": {"certain": thr_certain, "borderline": thr_border},
-        "pool_size": len(pool),
-        "fetched_per_flair": per_flair,
-        "candidates": candidates[:max_candidates],
-        "best": best,
-        "pool_ids": [getattr(p, "id", None) for p in pool if getattr(p, "id", None)],
+    # sort by score desc, then newest first (if equal)
+    scored.sort(key=lambda t: (t[0], getattr(t[2], "created_utc", 0.0)), reverse=True)
+
+    top_entries: List[Dict[str, Any]] = []
+    pool_ids: List[str] = []
+    best_entry: Optional[Dict[str, Any]] = None
+
+    for i, (score, rel, cand, mtype) in enumerate(scored):
+        certainty = _certainty(score, auto_t, border_t)
+        entry = _make_entry(score, certainty, rel, mtype, cand)
+        if i < 3:
+            top_entries.append(entry)
+        if best_entry is None:
+            best_entry = entry
+        pid = getattr(cand, "id", None)
+        if pid:
+            pool_ids.append(pid)
+
+    return {
+        "best": best_entry,
+        "top": top_entries,
+        "pool_ids": pool_ids,
     }
-    return report
-

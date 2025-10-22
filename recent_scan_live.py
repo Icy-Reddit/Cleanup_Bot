@@ -324,9 +324,6 @@ def main() -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--report-jsonl", default=None)
     ap.add_argument("--report-csv", default=None)
-    # Backward compatibility with older workflows
-    ap.add_argument("--log-jsonl", dest="report_jsonl")
-    ap.add_argument("--log-csv", dest="report_csv")
     ap.add_argument("--state-file", default=os.path.join("cache", "state.json"))
     ap.add_argument("--state-ttl-min", type=int, default=180)
     ap.add_argument("--verbose", action="store_true")

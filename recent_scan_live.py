@@ -5,6 +5,7 @@
 # - Logs to JSONL/CSV (optional)
 # - Poster matcher is disabled (reported as NO_REPORT)
 # - Adapter-aware calls to title_validator / title_matcher / decision_engine
+# - (NEW) --commit: perform minimal Reddit actions (remove / report)
 
 from __future__ import annotations
 import argparse
@@ -23,7 +24,7 @@ from dataclasses import asdict, is_dataclass
 try:
     import yaml
     import praw
-    from praw.models import Submission  # <— ważne: filtrujemy modqueue do postów
+    from praw.models import Submission
 except Exception as e:
     print("[FATAL] Missing deps:", e, file=sys.stderr)
     sys.exit(1)
@@ -58,11 +59,9 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 def get_reddit():
-    # Standardize on the Cleanup_Bot section (actions write praw.ini accordingly)
     try:
         return praw.Reddit("Cleanup_Bot")
     except Exception:
-        # Fallback to DEFAULT if local dev uses that
         return praw.Reddit("DEFAULT")
 
 def ensure_dir(p: str):
@@ -131,7 +130,6 @@ def fetch_candidates(
             return False
         return ts >= min_ts
 
-    # /new → zawsze zwraca Submission, dodatkowo filtrujemy po oknie czasowym
     if sources in ("new", "both"):
         try:
             for s in sub.new(limit=limit_per_source):
@@ -140,11 +138,9 @@ def fetch_candidates(
         except Exception as e:
             print(f"[WARN] Failed to fetch /new: {e}", file=sys.stderr)
 
-    # modqueue → MOŻE zawierać Comments/Reports; tu bierzemy tylko Submission
     if sources in ("modqueue", "both"):
         try:
             for s in sub.mod.modqueue(limit=limit_per_source):
-                # tylko posty + w oknie czasu
                 if isinstance(s, Submission):
                     cu = getattr(s, "created_utc", None)
                     if cu and ok(cu):
@@ -152,7 +148,6 @@ def fetch_candidates(
         except Exception as e:
             print(f"[WARN] Failed to fetch modqueue: {e}", file=sys.stderr)
 
-    # rosnąco po czasie (najstarsze → najnowsze); i tak ogranicza nas okno czasu
     out.sort(key=lambda it: getattr(it[1], "created_utc", 0.0))
     return out
 
@@ -170,8 +165,6 @@ def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
                 return fn(title)
         except Exception as e:
             return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
-
-    # Fallback heuristic (bardzo łagodna)
     if not title or len(title.split()) < 3:
         return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
     return {"status": "OK", "reason": "title_candidate"}
@@ -206,28 +199,16 @@ def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
             params = set(code.co_varnames[:pos + kwonly]) if code else set()
 
             kw = {}
-            # common
-            if "post" in params:
-                kw["post"] = post
-            if "config" in params:
-                kw["config"] = cfg
-            if "exclude_post_id" in params:
-                kw["exclude_post_id"] = pid
-            if "exclude_post_url" in params:
-                kw["exclude_post_url"] = permalink
-            # keyword-only / optional extras
-            if "title_raw" in params and title_raw is not None:
-                kw["title_raw"] = title_raw
-            if "author_name" in params and author_name is not None:
-                kw["author_name"] = author_name
-            if "flair_in" in params:
-                kw["flair_in"] = flair_in
-            if "subreddit" in params and subreddit is not None:
-                kw["subreddit"] = subreddit
-            if "reddit" in params and reddit_obj is not None:
-                kw["reddit"] = reddit_obj
-            if "post_created_utc" in params and created_utc is not None:
-                kw["post_created_utc"] = created_utc
+            if "post" in params: kw["post"] = post
+            if "config" in params: kw["config"] = cfg
+            if "exclude_post_id" in params: kw["exclude_post_id"] = pid
+            if "exclude_post_url" in params: kw["exclude_post_url"] = permalink
+            if "title_raw" in params and title_raw is not None: kw["title_raw"] = title_raw
+            if "author_name" in params and author_name is not None: kw["author_name"] = author_name
+            if "flair_in" in params: kw["flair_in"] = flair_in
+            if "subreddit" in params and subreddit is not None: kw["subreddit"] = subreddit
+            if "reddit" in params and reddit_obj is not None: kw["reddit"] = reddit_obj
+            if "post_created_utc" in params and created_utc is not None: kw["post_created_utc"] = created_utc
 
             rep = fn(**kw)
             return rep or {"best": None, "pool_ids": [], "top": []}
@@ -241,7 +222,6 @@ def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
     return {"best": None, "pool_ids": [], "top": []}
 
 def run_decision_engine(context, validator, title_report, poster_report, cfg):
-    # Pass through to decision_engine.decide if present; never raise.
     if decision_engine and hasattr(decision_engine, "decide"):
         try:
             rep = decision_engine.decide(
@@ -265,7 +245,6 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
                 "links": [],
             }
 
-    # Fallback minimalist logic (should rarely be used)
     status = validator.get("status", "OK")
     if status == "MISSING":
         return {
@@ -380,6 +359,7 @@ def main() -> int:
     ap.add_argument("--poster-pool", choices=("top", "full"), default="top")
     ap.add_argument("--fetch-per-flair", type=int, default=None)
     ap.add_argument("--live", action="store_true")
+    ap.add_argument("--commit", action="store_true", help="perform actions on Reddit (remove/report)")  # NEW
     ap.add_argument("--log-jsonl", nargs="?", const="", default=None)
     ap.add_argument("--report-csv", nargs="?", const="", default=None)
     ap.add_argument("--state-file", default=None)
@@ -407,10 +387,8 @@ def main() -> int:
 
     jsonl_path = None
     if args.log_jsonl is not None:
-        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.log_jsonl  # noqa: typo safeguard
-        # poprawka: gdy ktoś poda pusty argument, użyjemy domyślnej ścieżki
-        if not os.path.exists(os.path.dirname(jsonl_path)):
-            ensure_dir(jsonl_path)
+        jsonl_path = os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.jsonl") if args.log_jsonl == "" else args.log_jsonl
+        ensure_dir(jsonl_path)
 
     csv_path = None
     if args.report_csv is not None:
@@ -441,7 +419,6 @@ def main() -> int:
         preview = (selftext or "")[:160].replace("\n", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
 
-        # Podgląd nagłówka posta
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 
@@ -460,6 +437,7 @@ def main() -> int:
                 print_validator(validator)
                 print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
 
+            # log only
             if jsonl_path:
                 payload = {
                     "ts": iso(utcnow()),
@@ -506,7 +484,6 @@ def main() -> int:
             if t_title != "(unknown)":
                 print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
-        # Poster is disabled — keep a neutral stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
 
         context = {
@@ -522,6 +499,28 @@ def main() -> int:
         decisions_count[decision.get("action", "OTHER")] = decisions_count.get(decision.get("action", "OTHER"), 0) + 1
         if args.live:
             print_decision(decision, tmatch, poster_rep)
+
+        # -------- EXECUTOR (only with --commit) --------
+        if args.commit:
+            try:
+                if decision.get("action") == "AUTO_REMOVE":
+                    # Minimal, safe remove; no spam flag to avoid shadowbanning.
+                    post.mod.remove(spam=False)
+                    print("[ACTION] Removed (AUTO_REMOVE)")
+                elif decision.get("action") == "MOD_QUEUE":
+                    # If this came from /new, push into modqueue via report().
+                    if source == "new":
+                        # Compact reason; configurable text can be added later if needed.
+                        post.report("Titlematch: ambiguous/borderline – needs mod review")
+                        print("[ACTION] Reported to modqueue (from /new)")
+                    else:
+                        print("[ACTION] Already in modqueue (no duplicate report)")
+                else:
+                    # NO_ACTION or other → do nothing
+                    pass
+            except Exception as e:
+                print(f"[ACTION][WARN] Failed to execute action for {pid}: {e}", file=sys.stderr)
+        # -----------------------------------------------
 
         if jsonl_path:
             payload = {

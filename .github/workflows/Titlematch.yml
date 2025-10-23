@@ -71,6 +71,7 @@ jobs:
             --poster never \
             --poster-pool top \
             --live \
+            --commit \
             --state-file "cache/state.json" \
             --state-ttl-min 180 \
             --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \

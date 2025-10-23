@@ -175,7 +175,7 @@ def is_removed_or_deleted_comment(c) -> bool:
 def main():
     ap = argparse.ArgumentParser(description="Ustawianie ✅ Request Complete dla świeżych wątków (ostatnie N dni).")
     ap.add_argument("--days", type=int, default=3, help="ile dni wstecz przeglądać (domyślnie 3: dziś/wczoraj/przedwczoraj)")
-    ap.add_argument("--limit", type=int, default=200, help="maks. ile najnowszych postów pobrać do przesiewu")
+    ap.add_argument("--limit", type=int, default=300, help="maks. ile najnowszych postów pobrać do przesiewu")
     ap.add_argument("--interactive", action="store_true", help="pytaj y/N przy każdym kandydacie")
     ap.add_argument("--confirm", action="store_true", help="ustawiaj flair bez pytania (ostrożnie)")
     ap.add_argument("--comment", type=str, default=None, help="opcjonalny komentarz po zmianie flaira")
@@ -291,3 +291,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

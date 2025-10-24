@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
-# recent_scan_live.py — live scanner for r/CShortDramas
-# - Scans last N minutes from /new + modqueue (posts only)
-# - Skips already processed posts via --state-file
-# - Logs to JSONL/CSV (optional)
-# - Poster matcher is disabled (reported as NO_REPORT)
-# - Adapter-aware calls to title_validator / title_matcher / decision_engine
-# - (NEW) --commit: perform minimal Reddit actions (remove / report)
+# recent_scan_live.py — live scanner & minimal executor for r/CShortDramas
+#
+# - Scans last N minutes from /new + modqueue (Submissions only)
+# - Flair policy:
+#     📌 Link Request      → full analysis (validator, matcher, decision engine)
+#     🔗 Found & Shared    → skipped
+#     ✅ Request Complete  → skipped
+#     🎭 Actor Inquiry / 🔍 Inquiry → title validation only (no matcher/DE)
+#     others               → skipped
+# - State file prevents reprocessing within TTL
+# - Optional JSONL/CSV logging
+# - --live   → rich console logs
+# - --commit → perform actions:
+#       * AUTO_REMOVE → remove with Removal Reason (if found) + public sticky comment
+#       * MOD_QUEUE   → report() if source was /new (pushes to modqueue)
+#       * NO_ACTION   → do nothing
+#
+# Notes:
+# - Poster matcher is disabled (NO_REPORT stub)
+# - Decision Engine's fields used: action/category/reason/removal_reason/removal_comment/links
+# - Removal Reason lookup is by title (exact match)
 
 from __future__ import annotations
 import argparse
@@ -16,10 +30,11 @@ import os
 import sys
 import inspect
 import warnings
-warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
-
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import asdict, is_dataclass
+
+warnings.filterwarnings("ignore", message="Version .* of praw is outdated")
 
 try:
     import yaml
@@ -29,7 +44,7 @@ except Exception as e:
     print("[FATAL] Missing deps:", e, file=sys.stderr)
     sys.exit(1)
 
-# Optional imports (modules from the repo)
+# Optional project modules
 try:
     import title_validator
 except Exception:
@@ -52,6 +67,11 @@ def utcnow() -> dt.datetime:
 def iso(ts: dt.datetime) -> str:
     return ts.astimezone(dt.timezone.utc).isoformat()
 
+def ensure_dir(path: str):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
 def load_config(path: str) -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(f"config.yaml not found at: {path}")
@@ -59,15 +79,11 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 def get_reddit():
+    # Prefer explicit section used on Actions; fallback to DEFAULT for local devs
     try:
         return praw.Reddit("Cleanup_Bot")
     except Exception:
         return praw.Reddit("DEFAULT")
-
-def ensure_dir(p: str):
-    d = os.path.dirname(p)
-    if d:
-        os.makedirs(d, exist_ok=True)
 
 def append_jsonl(path: str, obj: dict):
     ensure_dir(path)
@@ -100,11 +116,13 @@ def save_state(path: Optional[str], state: Dict[str, Any]):
         json.dump(state, f, ensure_ascii=False)
 
 def gc_state(state: Dict[str, Any], ttl_min: int):
+    """Remove entries older than TTL minutes."""
     if ttl_min <= 0:
         return
     cutoff = utcnow().timestamp() - ttl_min * 60
     ids = state.get("ids", {})
-    for pid in [pid for pid, ts in ids.items() if ts < cutoff]:
+    stale = [pid for pid, ts in ids.items() if ts < cutoff]
+    for pid in stale:
         ids.pop(pid, None)
     state["ids"] = ids
 
@@ -117,15 +135,16 @@ def fetch_candidates(
     sources: str,
     limit_per_source: int,
     window_min: int
-) -> List[Any]:
+) -> List[Tuple[str, Submission]]:
+    """Return list of (source, Submission) within time window."""
     sub = r.subreddit(sub_name)
     now = utcnow()
     min_ts = now - dt.timedelta(minutes=window_min)
-    out: List[Tuple[str, Any]] = []
+    out: List[Tuple[str, Submission]] = []
 
-    def ok(t) -> bool:
+    def within_window(created_utc: float) -> bool:
         try:
-            ts = dt.datetime.fromtimestamp(t, tz=dt.timezone.utc)
+            ts = dt.datetime.fromtimestamp(created_utc, tz=dt.timezone.utc)
         except Exception:
             return False
         return ts >= min_ts
@@ -133,7 +152,7 @@ def fetch_candidates(
     if sources in ("new", "both"):
         try:
             for s in sub.new(limit=limit_per_source):
-                if isinstance(s, Submission) and ok(getattr(s, "created_utc", 0.0)):
+                if isinstance(s, Submission) and within_window(getattr(s, "created_utc", 0.0)):
                     out.append(("new", s))
         except Exception as e:
             print(f"[WARN] Failed to fetch /new: {e}", file=sys.stderr)
@@ -143,18 +162,19 @@ def fetch_candidates(
             for s in sub.mod.modqueue(limit=limit_per_source):
                 if isinstance(s, Submission):
                     cu = getattr(s, "created_utc", None)
-                    if cu and ok(cu):
+                    if cu and within_window(cu):
                         out.append(("modqueue", s))
         except Exception as e:
             print(f"[WARN] Failed to fetch modqueue: {e}", file=sys.stderr)
 
-    out.sort(key=lambda it: getattr(it[1], "created_utc", 0.0))
+    out.sort(key=lambda it: getattr(it[1], "created_utc", 0.0))  # oldest → newest
     return out
 
 
 # ------------------------ Module adapters ------------------------
 
 def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
+    """Call project's validator; fallback heuristic if missing."""
     if title_validator and hasattr(title_validator, "validate_title"):
         try:
             fn = title_validator.validate_title
@@ -165,11 +185,14 @@ def run_title_validator(title: str, flair: str, cfg: dict) -> Dict[str, Any]:
                 return fn(title)
         except Exception as e:
             return {"status": "AMBIGUOUS", "reason": f"validator_error: {e}"}
+
+    # Minimal fallback: short/raw titles are ambiguous/missing
     if not title or len(title.split()) < 3:
         return {"status": "AMBIGUOUS", "reason": "short_or_missing"}
     return {"status": "OK", "reason": "title_candidate"}
 
-def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
+def run_title_matcher(post: Submission, cfg: dict) -> Dict[str, Any]:
+    """Call project's matcher in a signature-agnostic way; robust to variants."""
     if not title_matcher:
         return {"best": None, "pool_ids": [], "top": []}
 
@@ -222,6 +245,7 @@ def run_title_matcher(post: Any, cfg: dict) -> Dict[str, Any]:
     return {"best": None, "pool_ids": [], "top": []}
 
 def run_decision_engine(context, validator, title_report, poster_report, cfg):
+    """Call project's DE; fallback minimal policy if missing."""
     if decision_engine and hasattr(decision_engine, "decide"):
         try:
             rep = decision_engine.decide(
@@ -245,13 +269,14 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
                 "links": [],
             }
 
+    # Minimal fallback
     status = validator.get("status", "OK")
     if status == "MISSING":
         return {
             "action": "AUTO_REMOVE",
             "category": "MISSING",
             "reason": "Title missing",
-            "removal_reason": "Lack of Drama Name or Description in Title",
+            "removal_reason": "Lack of Title",
             "removal_comment": None,
             "evidence": {},
             "links": [],
@@ -283,7 +308,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
 
 # ------------------------ Pretty printing ------------------------
 
-def print_human_post(source: str, post: Any, body_preview: Optional[str] = None) -> None:
+def print_human_post(source: str, post: Submission, body_preview: Optional[str] = None) -> None:
     created = dt.datetime.fromtimestamp(getattr(post, "created_utc", 0.0), tz=dt.timezone.utc).isoformat()
     author = f"u/{getattr(getattr(post, 'author', None), 'name', 'unknown')}"
     flair = getattr(post, "link_flair_text", None) or ""
@@ -347,6 +372,28 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
     print("===============================================")
 
 
+# ------------------------ Removal Reasons helper ------------------------
+
+# Default mapping when DE doesn't provide removal_reason title.
+REASON_TITLE_MAP = {
+    "REPEATED": "Repeated Request",
+    "DUPLICATE": "Duplicate",
+    "MISSING": "Lack of Title",
+}
+
+@lru_cache(maxsize=64)
+def get_reason_id(subreddit_name: str, reddit, reason_title: str) -> Optional[str]:
+    """Lookup removal reason id by its exact title in the subreddit."""
+    try:
+        sub = reddit.subreddit(subreddit_name)
+        for rr in sub.mod.removal_reasons:
+            if getattr(rr, "title", "") == reason_title:
+                return getattr(rr, "id", None)
+    except Exception:
+        return None
+    return None
+
+
 # ------------------------ Main ------------------------
 
 def main() -> int:
@@ -359,7 +406,7 @@ def main() -> int:
     ap.add_argument("--poster-pool", choices=("top", "full"), default="top")
     ap.add_argument("--fetch-per-flair", type=int, default=None)
     ap.add_argument("--live", action="store_true")
-    ap.add_argument("--commit", action="store_true", help="perform actions on Reddit (remove/report)")  # NEW
+    ap.add_argument("--commit", action="store_true", help="perform actions on Reddit (remove/report)")
     ap.add_argument("--log-jsonl", nargs="?", const="", default=None)
     ap.add_argument("--report-csv", nargs="?", const="", default=None)
     ap.add_argument("--state-file", default=None)
@@ -395,7 +442,7 @@ def main() -> int:
         csv_path = args.report_csv or os.path.join("logs", f"decisions_{utcnow().date().isoformat()}.csv")
         ensure_dir(csv_path)
 
-    # --- Flair policy sets ---
+    # Flair policy sets
     FLAIR_LINK_REQUEST = {"📌 Link Request"}
     FLAIR_SKIP = {"🔗 Found & Shared", "✅ Request Complete"}
     FLAIR_INQUIRY = {"🎭 Actor Inquiry", "🔍 Inquiry"}
@@ -422,22 +469,22 @@ def main() -> int:
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 
-        # ---------- FLAIR ROUTING ----------
-        # 1) Skip flairs entirely
+        # ---------- Flair routing ----------
+        # Skip everything outside Link Request / Inquiry
         if flair in FLAIR_SKIP or (flair not in FLAIR_LINK_REQUEST and flair not in FLAIR_INQUIRY):
             if args.live or args.verbose:
                 reason = "Found&Shared/RequestComplete" if flair in FLAIR_SKIP else "non-target flair"
                 print(f"[SKIP] flair={flair or '(none)'} | reason={reason}")
             continue
 
-        # 2) Inquiry-only: validate title, no matcher, no decision engine
+        # Inquiry-only: validate, no matcher/DE
         if flair in FLAIR_INQUIRY:
             validator = run_title_validator(title, flair, cfg)
             if args.live:
                 print_validator(validator)
                 print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
 
-            # log only
+            # Log as NO_ACTION | VALIDATION_ONLY
             if jsonl_path:
                 payload = {
                     "ts": iso(utcnow()),
@@ -472,7 +519,7 @@ def main() -> int:
             decisions_count["NO_ACTION"] = decisions_count.get("NO_ACTION", 0) + 1
             continue
 
-        # 3) Link Request: pełna analiza
+        # Link Request: full analysis
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
@@ -484,6 +531,7 @@ def main() -> int:
             if t_title != "(unknown)":
                 print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
+        # Poster disabled stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}
 
         context = {
@@ -500,28 +548,60 @@ def main() -> int:
         if args.live:
             print_decision(decision, tmatch, poster_rep)
 
-        # -------- EXECUTOR (only with --commit) --------
+        # -------- EXECUTOR (only if --commit) --------
         if args.commit:
             try:
-                if decision.get("action") == "AUTO_REMOVE":
-                    # Minimal, safe remove; no spam flag to avoid shadowbanning.
-                    post.mod.remove(spam=False)
-                    print("[ACTION] Removed (AUTO_REMOVE)")
-                elif decision.get("action") == "MOD_QUEUE":
-                    # If this came from /new, push into modqueue via report().
+                action = (decision.get("action") or "").upper()
+
+                if action == "AUTO_REMOVE":
+                    # Determine reason title: prefer DE.removal_reason, fallback by category
+                    reason_title = decision.get("removal_reason")
+                    if not reason_title:
+                        cat = (decision.get("category") or "").upper()
+                        reason_title = REASON_TITLE_MAP.get(cat)
+
+                    reason_id = None
+                    if reason_title:
+                        reason_id = get_reason_id(
+                            subreddit_name=str(post.subreddit.display_name),
+                            reddit=r,
+                            reason_title=reason_title
+                        )
+
+                    # Remove with reason_id (if found) and optional mod note
+                    post.mod.remove(reason_id=reason_id, mod_note=(decision.get("reason") or ""))
+
+                    # Public sticky message (prefer DE.removal_comment; fallback by reason_title)
+                    msg = (decision.get("removal_comment") or "").strip()
+                    if not msg:
+                        if reason_title == "Repeated Request":
+                            msg = "Removed as a repeated request. Please search existing requests before posting."
+                        elif reason_title == "Duplicate":
+                            msg = "Removed as a duplicate (same author)."
+                        elif reason_title == "Lack of Title":
+                            msg = "Removed due to missing or insufficient drama title/description."
+                        else:
+                            msg = "Removed by Titlematch."
+
+                    # Must follow remove(); type='public' leaves sticky comment
+                    post.mod.send_removal_message(message=msg, type="public")
+                    print(f"[ACTION] Removed with reason='{reason_title or 'None'}' + public message")
+
+                elif action == "MOD_QUEUE":
+                    # If came from /new, push to modqueue by reporting; avoid duplicate when already from modqueue
                     if source == "new":
-                        # Compact reason; configurable text can be added later if needed.
                         post.report("Titlematch: ambiguous/borderline – needs mod review")
                         print("[ACTION] Reported to modqueue (from /new)")
                     else:
                         print("[ACTION] Already in modqueue (no duplicate report)")
-                else:
-                    # NO_ACTION or other → do nothing
-                    pass
+
+                # NO_ACTION → do nothing
+
             except Exception as e:
                 print(f"[ACTION][WARN] Failed to execute action for {pid}: {e}", file=sys.stderr)
-        # -----------------------------------------------
+        # ---------------------------------------------
 
+        # Logging (after actions too)
         if jsonl_path:
             payload = {
                 "ts": iso(utcnow()),
@@ -554,6 +634,7 @@ def main() -> int:
 
         processed += 1
 
+    # Save state
     if args.state_file:
         try:
             save_state(args.state_file, state)
@@ -562,7 +643,10 @@ def main() -> int:
 
     if args.live or args.verbose:
         total = len(posts)
-        print(f"[SUMMARY] total={total} processed={processed} skipped_due_to_state={skipped} decisions={{AUTO_REMOVE:{decisions_count.get('AUTO_REMOVE',0)}, MOD_QUEUE:{decisions_count.get('MOD_QUEUE',0)}, NO_ACTION:{decisions_count.get('NO_ACTION',0)}}}")
+        print(f"[SUMMARY] total={total} processed={processed} skipped_due_to_state={skipped} "
+              f"decisions={{AUTO_REMOVE:{decisions_count.get('AUTO_REMOVE',0)}, "
+              f"MOD_QUEUE:{decisions_count.get('MOD_QUEUE',0)}, "
+              f"NO_ACTION:{decisions_count.get('NO_ACTION',0)}}}")
     return 0
 
 

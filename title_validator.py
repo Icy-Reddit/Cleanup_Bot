@@ -1,85 +1,119 @@
-# title_validator.py (patched)
+# title_validator.py
+# Heurystyczna walidacja tytułów dla r/CShortDramas
+# Cel: wychwycić brak nazwy/opisu dramy w 📌 Link Request (np. "Need help finding title or link")
+
 from __future__ import annotations
-from typing import Dict, Any, List
 import re
+import unicodedata
+from typing import Dict, List, Set
 
-_CJK_OR_LATIN_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9FFF\s]+")
-_MULTISPACE_RE = re.compile(r"\s+")
-_EMOJI_OR_SYMBOLS_RE = re.compile(r"[\u2600-\u27BF\U0001F300-\U0001FAFF]")
-
-STOPWORDS_VALID = {
-    "help","please","pls","plz","find","looking","for","link",
-    "title","name","drama","cdrama","movie","series",
-    "this","that","the","a","an","anyone","can","someone","need",
-    "unknown","idk","dont","don't","know","me","my","to","of"
+# Słowa nie-niosące informacji (po normalizacji, lower-case)
+GENERIC_STOPWORDS: Set[str] = {
+    # ogólne prośby/słowa serwisowe
+    "need", "needs", "help", "please", "pls", "plz", "anyone", "someone", "anybody",
+    "trying", "try", "find", "finding", "look", "looking", "search", "searching",
+    "title", "name", "link", "links", "id", "identify", "identification",
+    "this", "that", "it", "one", "what", "which",
+    # domenowe ogólniki
+    "drama", "show", "series", "movie", "short", "shorts", "micro", "episode", "episodes",
+    "english", "eng", "subs", "subtitle", "subtitles",
+    # platformy / ogólniki
+    "douyin", "tiktok", "youtube", "yt", "bilibili", "xiaohongshu", "xhs",
+    # spójniki/zaimki itp.
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "with",
+    "is", "are", "was", "were", "be", "been", "being",
+    "my", "your", "their", "his", "her", "our",
+    "please,", "please.", "help.", "help,",  # czasem po znakach
 }
 
-def _norm(text: str) -> str:
-    t = (text or "").lower()
-    t = _EMOJI_OR_SYMBOLS_RE.sub(" ", t)
-    t = _CJK_OR_LATIN_RE.sub(" ", t)
-    t = _MULTISPACE_RE.sub(" ", t).strip()
-    return t
+# Wyrażenia typu „pusta prośba” – jeśli pasuje i brak innych sygnałów → MISSING
+GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
+    re.compile(r"\bneed\s+help\b", re.I),
+    re.compile(r"\bhelp\s+me\b", re.I),
+    re.compile(r"\bhelp\b.*\bfind(ing)?\b", re.I),
+    re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
+    re.compile(r"\b(title|name)\b.*\blink\b", re.I),
+    re.compile(r"\blooking\s+for\b", re.I),
+    re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
+]
 
-def _tokens_no_stop(text: str) -> List[str]:
-    return [w for w in text.split() if w and w not in STOPWORDS_VALID]
+# Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
+STRICT_FLAIRS = {"📌 Link Request"}
 
-def _has_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9FFF]", text))
+def _nfkc(s: str) -> str:
+    return unicodedata.normalize("NFKC", s)
 
-def _looks_like_title(original: str) -> bool:
-    # 2–6 słów, większość zaczyna się wielką literą albo tytuł jest w cudzysłowie
-    if not original:
-        return False
-    o = original.strip()
-    if ('"' in o) or ("“" in o and "”" in o) or ("'" in o):
+def _normalize_text(s: str) -> str:
+    s = _nfkc(s or "")
+    # Usuwamy nadmiarową interpunkcję (zachowujemy cyfry/litery/CJK)
+    s = re.sub(r"[^\w\s\u4e00-\u9fff\u3040-\u30ff]", " ", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _tokens(s: str) -> List[str]:
+    if not s:
+        return []
+    return [t for t in s.lower().split() if t]
+
+def _informative_tokens(tokens: List[str]) -> List[str]:
+    return [t for t in tokens if t not in GENERIC_STOPWORDS and len(t) >= 2]
+
+def _has_strong_signal(tokens: List[str]) -> bool:
+    """
+    Silne sygnały, że tytuł niesie konkretną informację:
+    - numer identyfikacyjny / rok / 4+ cyfry (np. 11735),
+    - mix liter i cyfr (np. s02e03, ep10),
+    - obecność co najmniej 2 sensownych tokenów >=4 znaków po odcięciu stopwordów.
+    """
+    if any(re.fullmatch(r"\d{4,}", t) for t in tokens):
         return True
-    parts = [w for w in re.split(r"\s+", o) if w]
-    if 2 <= len(parts) <= 6:
-        caps = sum(1 for w in parts if w[:1].isupper())
-        return caps >= max(2, len(parts) - 1)  # np. "The Mist of Yun"
+    if any(re.search(r"[A-Za-z]\d|\d[A-Za-z]", t) for t in tokens):
+        return True
+    informative = _informative_tokens(tokens)
+    if sum(1 for t in informative if len(t) >= 4) >= 2:
+        return True
     return False
 
-def validate_title(title: str, flair: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    t = (title or "").strip()
-    t_norm = _norm(t)
-    toks_nostop = _tokens_no_stop(t_norm)
-    has_cjk = _has_cjk(t_norm)
+def _looks_like_generic_request(raw: str) -> bool:
+    return any(p.search(raw) for p in GENERIC_TITLE_PATTERNS)
 
-def _rescue_title_from_url(raw_title: str) -> str | None:
-    # znajdź URL, pobierz path, weź ostatni niepusty segment
-    # unquote + replace ['_', '-'] -> ' '
-    # strip + collapse whitespace
-    # jeśli >= 2 słowa zawierające litery -> zwróć string; inaczej None
+def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
+    """
+    Zwraca dict: {"status": "OK|AMBIGUOUS|MISSING", "reason": "<krótki_powód>"}
+    - Dla 📌 Link Request: wymagamy nazwy/opisu; „puste” prośby klasyfikujemy jako MISSING.
+    - Dla Inquiry: nieco łagodniej, ale tu i tak robimy tylko walidację (matcher off).
+    """
+    flair = (flair or "").strip()
+    title_raw = (title or "").strip()
 
-title = normalize(raw_title)
-if looks_empty(title):
-    rescued = _rescue_title_from_url(raw_title)
-    if rescued and looks_like_title(rescued):
-        title = rescued  # użyj „odratowanego” tytułu zamiast oceniać jako MISSING
+    if not title_raw:
+        return {"status": "MISSING", "reason": "empty_title"}
 
-    
-    # NOWE: jeśli wygląda jak krótki, poprawny tytuł — akceptuj
-    if _looks_like_title(t):
-        return {"status": "OK", "reason": "title_candidate", "notes": ["looks_like_title"]}
+    title_norm = _normalize_text(title_raw)
+    toks = _tokens(title_norm)
+    informative = _informative_tokens(toks)
 
-    # ZMIANA PROGU: hard MISSING tylko gdy <2 informacyjnych tokenów i brak CJK
-    if len(toks_nostop) < 2 and not has_cjk:
-        return {"status": "MISSING", "reason": "only_empty_phrases", "notes": ["no informative tokens"]}
+    # Szybkie ścieżki
+    if flair in STRICT_FLAIRS:
+        # 1) Ekstremalnie krótkie po usunięciu stopwordów
+        if len(informative) < 2 and not _has_strong_signal(toks):
+            # Przykłady: "Need help finding title", "Help with link"
+            return {"status": "MISSING", "reason": "generic_title"}
 
-    # Heurystyki treści (bez zmian)
-    hint_patterns = [
-        r"\b(reborn|revenge|ceo|marriage|heiress|pilot|accident|banquet)\b",
-        r"\b(actor|actress|ml|fl|male\s+lead|female\s+lead|with\s+actor)\b",
-        r"\b(title:)\s*[\u4e00-\u9FFF]+",
-        r"[\u4e00-\u9FFF]{2,}",
-    ]
-    for pat in hint_patterns:
-        if re.search(pat, t_norm):
-            return {"status": "OK", "reason": "has_actor_or_genre_or_plot", "notes": []}
+        # 2) Dopasowanie do typowych „pustych próśb” bez sygnałów
+        if _looks_like_generic_request(title_norm) and not _has_strong_signal(toks):
+            return {"status": "MISSING", "reason": "generic_title"}
 
-    # Fallback: po usunięciu stopwordów 2+ tokeny lub obecne CJK → OK
-    if len(toks_nostop) >= 2 or has_cjk:
-        return {"status": "OK", "reason": "title_candidate", "notes": []}
+        # 3) Bardzo krótki tytuł (1 słowo) bez cyfr → mało informacyjny
+        if len(toks) <= 2 and not any(ch.isdigit() for ch in title_norm):
+            # wyjątek: pojedynczy, mocny wyraz + cyfra/liczba przejdą
+            if len(informative) < 1:
+                return {"status": "AMBIGUOUS", "reason": "too_short_after_filter"}
 
-    return {"status": "AMBIGUOUS", "reason": "short_unclear", "notes": []}
+    else:
+        # Łagodniejsze zasady dla innych flairów (np. Inquiry)
+        if len(informative) == 0 and not _has_strong_signal(toks):
+            return {"status": "AMBIGUOUS", "reason": "uninformative"}
+
+    # Jeśli przeszło powyższe filtry — wygląda OK
+    return {"status": "OK", "reason": "title_candidate"}

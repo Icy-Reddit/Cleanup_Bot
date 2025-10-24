@@ -276,7 +276,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
             "action": "AUTO_REMOVE",
             "category": "MISSING",
             "reason": "Title missing",
-            "removal_reason": "Lack of Title",
+            "removal_reason": "Lack of title or description",
             "removal_comment": None,
             "evidence": {},
             "links": [],
@@ -376,9 +376,9 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
 
 # Default mapping when DE doesn't provide removal_reason title.
 REASON_TITLE_MAP = {
-    "REPEATED": "Repeated Request",
-    "DUPLICATE": "Duplicate",
-    "MISSING": "Lack of Title",
+    "REPEATED": "Repeated Request",             # (opcjonalnie: "Unsolved Request")
+    "DUPLICATE": "Duplicate Post",              # <- zaktualizowane
+    "MISSING": "Lack of title or description",  # <- zaktualizowane
 }
 
 @lru_cache(maxsize=64)
@@ -575,13 +575,13 @@ def main() -> int:
                     msg = (decision.get("removal_comment") or "").strip()
                     if not msg:
                         if reason_title == "Repeated Request":
-                            msg = "Removed as a repeated request. Please search existing requests before posting."
-                        elif reason_title == "Duplicate":
-                            msg = "Removed as a duplicate (same author)."
-                        elif reason_title == "Lack of Title":
-                            msg = "Removed due to missing or insufficient drama title/description."
+                            msg = "This request was already posted recently. Please use the search bar before posting."
+                        elif reason_title == "Duplicate Post":
+                            msg = "Duplicate posts are not allowed."
+                        elif reason_title == "Lack of title or description":
+                            msg = "Your title must include the drama’s name or a concrete description. Please repost with a specific title."
                         else:
-                            msg = "Removed by Titlematch."
+                            msg = "Post removed per subreddit rules."
 
                     # Must follow remove(); type='public' leaves sticky comment
                     post.mod.send_removal_message(message=msg, type="public")

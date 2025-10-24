@@ -377,8 +377,8 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
 # Default mapping when DE doesn't provide removal_reason title.
 REASON_TITLE_MAP = {
     "REPEATED": "Repeated Request",             # (opcjonalnie: "Unsolved Request")
-    "DUPLICATE": "Duplicate Post",              # <- zaktualizowane
-    "MISSING": "Lack of title or description",  # <- zaktualizowane
+    "DUPLICATE": "Duplicate Post",
+    "MISSING": "Lack of title or description",
 }
 
 @lru_cache(maxsize=64)
@@ -568,8 +568,8 @@ def main() -> int:
                             reason_title=reason_title
                         )
 
-                    # Remove with reason_id (if found) and optional mod note
-                    post.mod.remove(reason_id=reason_id, mod_note=(decision.get("reason") or ""))
+                    # Remove with reason_id only (NO mod_note anywhere)
+                    post.mod.remove(reason_id=reason_id)
 
                     # Public sticky message (prefer DE.removal_comment; fallback by reason_title)
                     msg = (decision.get("removal_comment") or "").strip()
@@ -653,6 +653,10 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
+        raise
+
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
         raise

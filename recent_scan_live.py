@@ -7,6 +7,7 @@
 #     🔗 Found & Shared    → skipped
 #     ✅ Request Complete  → skipped
 #     🎭 Actor Inquiry / 🔍 Inquiry → title validation only (no matcher/DE)
+#       + opcjonalnie (--inquiry-generic-only) reaguj tylko na ewidentne „puste frazy”
 #     others               → skipped
 # - State file prevents reprocessing within TTL
 # - Optional JSONL/CSV logging
@@ -269,7 +270,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
                 "links": [],
             }
 
-    # Minimal fallback
+    # Minimal fallback (gdy projektowy DE nie istnieje)
     status = validator.get("status", "OK")
     if status == "MISSING":
         return {
@@ -407,6 +408,8 @@ def main() -> int:
     ap.add_argument("--fetch-per-flair", type=int, default=None)
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--commit", action="store_true", help="perform actions on Reddit (remove/report)")
+    ap.add_argument("--inquiry-generic-only", action="store_true",
+                    help="For Inquiry: only act on obviously generic titles (help/looking/title/link), else skip.")
     ap.add_argument("--log-jsonl", nargs="?", const="", default=None)
     ap.add_argument("--report-csv", nargs="?", const="", default=None)
     ap.add_argument("--state-file", default=None)
@@ -477,14 +480,94 @@ def main() -> int:
                 print(f"[SKIP] flair={flair or '(none)'} | reason={reason}")
             continue
 
-        # Inquiry-only: validate, no matcher/DE
+        # Inquiry-only
         if flair in FLAIR_INQUIRY:
             validator = run_title_validator(title, flair, cfg)
             if args.live:
                 print_validator(validator)
                 print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
 
-            # Log as NO_ACTION | VALIDATION_ONLY
+            # NEW (inquiry-generic-only): reaguj tylko na oczywiście „puste” tytuły
+            acted = False
+            if args.inquiry_generic_only and title_validator and hasattr(title_validator, "is_generic_inquiry"):
+                try:
+                    if title_validator.is_generic_inquiry(title):
+                        # Bezpieczniej: kierujemy do MOD_QUEUE (report z /new)
+                        decision = {
+                            "action": "MOD_QUEUE",
+                            "category": "INQUIRY_GENERIC",
+                            "reason": "Generic inquiry title without concrete drama name/description",
+                            "removal_reason": None,
+                            "removal_comment": None,
+                            "evidence": {},
+                            "links": [],
+                        }
+
+                        if args.live:
+                            print("=============== DECISION ENGINE ===============")
+                            print(f"When: {iso(utcnow())}")
+                            print("Action: MOD_QUEUE | Category: INQUIRY_GENERIC")
+                            print("Reason: Generic inquiry title without concrete drama name/description")
+                            print("Removal Reason: None\n")
+                            print("-- Title Match --")
+                            print("type=skipped | score=0 | certainty=low | relation=unknown")
+                            print()
+                            print("-- Poster Match --")
+                            print("status=NO_REPORT | distance=None | relation=unknown\n")
+                            print("===============================================")
+
+                        # Wykonanie akcji tylko gdy --commit
+                        if args.commit:
+                            try:
+                                if source == "new":
+                                    post.report("Inquiry: generic title (no drama name/description) – needs mod review")
+                                    print("[ACTION] Reported to modqueue (Inquiry generic, from /new)")
+                                else:
+                                    print("[ACTION] Inquiry generic already in modqueue (no duplicate report)")
+                            except Exception as e:
+                                print(f"[ACTION][WARN] Failed to report inquiry generic for {pid}: {e}", file=sys.stderr)
+
+                        # Log (JSONL/CSV)
+                        if jsonl_path:
+                            payload = {
+                                "ts": iso(utcnow()),
+                                "source": source,
+                                "post_id": pid,
+                                "context": {"author": getattr(getattr(post, "author", None), "name", None), "flair": flair, "title": title},
+                                "decision": decision,
+                            }
+                            try:
+                                append_jsonl(jsonl_path, payload)
+                            except Exception as e:
+                                print(f"[LOG][WARN] JSONL append failed: {e}", file=sys.stderr)
+
+                        if csv_path:
+                            row = {
+                                "ts": iso(utcnow()),
+                                "source": source,
+                                "post_id": pid,
+                                "author": getattr(getattr(post, "author", None), "name", None),
+                                "flair": flair,
+                                "title": title,
+                                "action": decision.get("action"),
+                                "category": decision.get("category"),
+                                "reason": decision.get("reason"),
+                            }
+                            try:
+                                append_csv(csv_path, row, header_order=list(row.keys()))
+                            except Exception as e:
+                                print(f"[LOG][WARN] CSV append failed: {e}", file=sys.stderr)
+
+                        decisions_count["MOD_QUEUE"] = decisions_count.get("MOD_QUEUE", 0) + 1
+                        processed += 1
+                        acted = True
+                except Exception as e:
+                    print(f"[WARN] inquiry_generic_only check failed: {e}", file=sys.stderr)
+
+            if acted:
+                continue  # zakończ obsługę tego posta
+
+            # Stare zachowanie (brak akcji) — tylko log NO_ACTION | VALIDATION_ONLY
             if jsonl_path:
                 payload = {
                     "ts": iso(utcnow()),
@@ -653,10 +736,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except KeyboardInterrupt:
-        print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
-        raise
-
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] Ctrl+C", file=sys.stderr)
         raise

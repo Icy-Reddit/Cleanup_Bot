@@ -277,7 +277,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
             "action": "AUTO_REMOVE",
             "category": "MISSING",
             "reason": "Title missing",
-            "removal_reason": "Lack of title or description",
+            "removal_reason": "Lack of title or description in the title",
             "removal_comment": None,
             "evidence": {},
             "links": [],
@@ -497,8 +497,15 @@ def main() -> int:
                             "action": "AUTO_REMOVE",
                             "category": "MISSING",
                             "reason": "Generic inquiry title without concrete drama name/description",
-                            "removal_reason": "Lack of title or description",
-                            "removal_comment": "Your title must include the drama’s name or a concrete description. Please repost with a specific title.",
+                            "removal_reason": "Lack of title or description in the title",
+                            "removal_comment": (
+                                "Your post has been removed because it doesn't include the drama name or a short description in the header. "
+                                "This is required to keep the subreddit organized and help others find and fulfill similar requests. "
+                                "If the name is visible on the poster, just add it to the header. If there’s no name, please add a short "
+                                "description instead. Think of what caught your attention, add the genre, storyline, actor’s name, or a brief "
+                                "summary of what you saw in the ad. Why do we ask this? Because search terms like \"link\" or \"Do you know the title?\" "
+                                "aren’t helpful for others looking for the same drama."
+                            ),
                             "evidence": {},
                             "links": [],
                         }

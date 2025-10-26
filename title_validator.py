@@ -120,6 +120,38 @@ def _has_suspect_word(tokens: List[str]) -> bool:
     tl = [t.lower() for t in tokens]
     return any(t in SUSPECT_HINTS for t in tl)
 
+def is_generic_inquiry(title: str) -> bool:
+    """
+    True, jeśli tytuł wygląda na „pustą prośbę” (help/title/link/looking for...),
+    a jednocześnie nie zawiera silnych sygnałów (np. 11735, CJK, litera+cyfra).
+    Używane wyłącznie dla flairów Inquiry.
+    """
+    title_raw = (title or "").strip()
+    if not title_raw:
+        return True  # pusty = ewidentnie zły
+
+    title_norm = _normalize_text(title_raw)
+    toks = _tokens(title_norm)
+
+    # Jeżeli w ogóle nie ma tokenów po normalizacji, traktujemy jako puste
+    if not toks:
+        return True
+
+    # Jeśli są „silne sygnały”, nie kwalifikujemy jako 'generic inquiry'
+    if _has_strong_signal(toks):
+        return False
+
+    # Typowe puste wzorce (need help / help me / looking for / find title / title+link)
+    if _looks_like_generic_request(title_norm):
+        return True
+
+    # Ultra-krótkie tytuły zawierające słowa podejrzane (help/title/link/please/looking…)
+    if _has_suspect_word(toks):
+        # brak silnych sygnałów + podejrzane słowo → generica
+        return True
+
+    return False
+
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
     """
     Zwraca dict: {"status": "OK|AMBIGUOUS|MISSING", "reason": "<krótki_powód>"}.

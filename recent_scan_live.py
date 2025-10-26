@@ -249,7 +249,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
     """Call project's DE; fallback minimal policy if missing."""
     if decision_engine and hasattr(decision_engine, "decide"):
         try:
-            rep = decision_engine.decice(  # NOTE: if your project uses 'decide', keep spelling; 'decice' typo will be fixed if needed
+            rep = decision_engine.decide(
                 context=context,
                 validator=validator,
                 title_report=title_report,

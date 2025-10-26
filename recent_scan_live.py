@@ -7,7 +7,7 @@
 #     🔗 Found & Shared    → skipped
 #     ✅ Request Complete  → skipped
 #     🎭 Actor Inquiry / 🔍 Inquiry → title validation only (no matcher/DE)
-#       + opcjonalnie (--inquiry-generic-only) reaguj tylko na ewidentne „puste frazy”
+#       + opcjonalnie (--inquiry-generic-only) usuwa ewidentne „puste frazy”
 #     others               → skipped
 # - State file prevents reprocessing within TTL
 # - Optional JSONL/CSV logging
@@ -249,7 +249,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
     """Call project's DE; fallback minimal policy if missing."""
     if decision_engine and hasattr(decision_engine, "decide"):
         try:
-            rep = decision_engine.decide(
+            rep = decision_engine.decice(  # NOTE: if your project uses 'decide', keep spelling; 'decice' typo will be fixed if needed
                 context=context,
                 validator=validator,
                 title_report=title_report,
@@ -409,7 +409,7 @@ def main() -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--commit", action="store_true", help="perform actions on Reddit (remove/report)")
     ap.add_argument("--inquiry-generic-only", action="store_true",
-                    help="For Inquiry: only act on obviously generic titles (help/looking/title/link), else skip.")
+                    help="For Inquiry: only act on obviously generic titles (help/looking/title/link).")
     ap.add_argument("--log-jsonl", nargs="?", const="", default=None)
     ap.add_argument("--report-csv", nargs="?", const="", default=None)
     ap.add_argument("--state-file", default=None)
@@ -487,18 +487,18 @@ def main() -> int:
                 print_validator(validator)
                 print("[INFO] Inquiry flair → matcher disabled; decision engine not run.")
 
-            # NEW (inquiry-generic-only): reaguj tylko na oczywiście „puste” tytuły
+            # NEW (inquiry-generic-only): usuń wyłącznie oczywiste „puste” tytuły
             acted = False
             if args.inquiry_generic_only and title_validator and hasattr(title_validator, "is_generic_inquiry"):
                 try:
                     if title_validator.is_generic_inquiry(title):
-                        # Bezpieczniej: kierujemy do MOD_QUEUE (report z /new)
+                        # AUTO_REMOVE dla Inquiry–generic
                         decision = {
-                            "action": "MOD_QUEUE",
-                            "category": "INQUIRY_GENERIC",
+                            "action": "AUTO_REMOVE",
+                            "category": "MISSING",
                             "reason": "Generic inquiry title without concrete drama name/description",
-                            "removal_reason": None,
-                            "removal_comment": None,
+                            "removal_reason": "Lack of title or description",
+                            "removal_comment": "Your title must include the drama’s name or a concrete description. Please repost with a specific title.",
                             "evidence": {},
                             "links": [],
                         }
@@ -506,9 +506,9 @@ def main() -> int:
                         if args.live:
                             print("=============== DECISION ENGINE ===============")
                             print(f"When: {iso(utcnow())}")
-                            print("Action: MOD_QUEUE | Category: INQUIRY_GENERIC")
+                            print("Action: AUTO_REMOVE | Category: MISSING")
                             print("Reason: Generic inquiry title without concrete drama name/description")
-                            print("Removal Reason: None\n")
+                            print("Removal Reason: Lack of title or description\n")
                             print("-- Title Match --")
                             print("type=skipped | score=0 | certainty=low | relation=unknown")
                             print()
@@ -516,16 +516,19 @@ def main() -> int:
                             print("status=NO_REPORT | distance=None | relation=unknown\n")
                             print("===============================================")
 
-                        # Wykonanie akcji tylko gdy --commit
                         if args.commit:
                             try:
-                                if source == "new":
-                                    post.report("Inquiry: generic title (no drama name/description) – needs mod review")
-                                    print("[ACTION] Reported to modqueue (Inquiry generic, from /new)")
-                                else:
-                                    print("[ACTION] Inquiry generic already in modqueue (no duplicate report)")
+                                reason_title = decision["removal_reason"]
+                                reason_id = get_reason_id(
+                                    subreddit_name=str(post.subreddit.display_name),
+                                    reddit=r,
+                                    reason_title=reason_title
+                                )
+                                post.mod.remove(reason_id=reason_id)
+                                post.mod.send_removal_message(message=decision["removal_comment"], type="public")
+                                print(f"[ACTION] Removed (Inquiry generic) with reason='{reason_title}' + public message")
                             except Exception as e:
-                                print(f"[ACTION][WARN] Failed to report inquiry generic for {pid}: {e}", file=sys.stderr)
+                                print(f"[ACTION][WARN] Failed to remove inquiry generic for {pid}: {e}", file=sys.stderr)
 
                         # Log (JSONL/CSV)
                         if jsonl_path:
@@ -558,7 +561,7 @@ def main() -> int:
                             except Exception as e:
                                 print(f"[LOG][WARN] CSV append failed: {e}", file=sys.stderr)
 
-                        decisions_count["MOD_QUEUE"] = decisions_count.get("MOD_QUEUE", 0) + 1
+                        decisions_count["AUTO_REMOVE"] = decisions_count.get("AUTO_REMOVE", 0) + 1
                         processed += 1
                         acted = True
                 except Exception as e:

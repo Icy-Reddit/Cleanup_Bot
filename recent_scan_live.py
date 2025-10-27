@@ -277,7 +277,7 @@ def run_decision_engine(context, validator, title_report, poster_report, cfg):
             "action": "AUTO_REMOVE",
             "category": "MISSING",
             "reason": "Title missing",
-            "removal_reason": "Lack of title or description in the title",
+            "removal_reason": "Lack of Drama Name or Description in Title",
             "removal_comment": None,
             "evidence": {},
             "links": [],
@@ -497,7 +497,7 @@ def main() -> int:
                             "action": "AUTO_REMOVE",
                             "category": "MISSING",
                             "reason": "Generic inquiry title without concrete drama name/description",
-                            "removal_reason": "Lack of title or description in the title",
+                            "removal_reason": "Lack of Drama Name or Description in Title",
                             "removal_comment": (
                                 "Your post has been removed because it doesn't include the drama name or a short description in the header. "
                                 "This is required to keep the subreddit organized and help others find and fulfill similar requests. "

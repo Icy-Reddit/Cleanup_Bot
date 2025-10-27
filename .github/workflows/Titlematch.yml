@@ -2,7 +2,7 @@ name: Titlematch 24/7
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # co 15 min (UTC)
+    - cron: "*/10 * * * *"   # co 15 min (UTC)
   workflow_dispatch:
 
 concurrency:

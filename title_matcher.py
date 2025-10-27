@@ -286,6 +286,10 @@ def match_title(
 
     for i, (score, rel, cand, mtype) in enumerate(scored):
         certainty = _certainty(score, auto_t, border_t)
+        # Bezpiecznik: 'certain' tylko dla normalized_exact (pełna równość po normalizacji)
+        if mtype != "normalized_exact" and certainty == "certain":
+            certainty = "borderline"
+            
         entry = _make_entry(score, certainty, rel, mtype, cand)
         if i < 3:
             top_entries.append(entry)

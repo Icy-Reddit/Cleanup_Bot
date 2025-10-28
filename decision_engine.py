@@ -186,7 +186,7 @@ def decide(*, context, validator, title_report, poster_report, config=None):
                 "links": _links_from_title(title_report),
             }
 
-        if t_rel == "different_author" and (_is_title_certain(t_score, auto_t) or p_status == "CERTAIN"):
+        if t_rel == "different_author" and (t_type in ("exact", "normalized_exact") or p_status == "CERTAIN"):
             comment = _comment_from_config(config, "repeated_request_template", _DEFAULTS["comments"]["repeated_request_template"])
             return {
                 "action": "AUTO_REMOVE",

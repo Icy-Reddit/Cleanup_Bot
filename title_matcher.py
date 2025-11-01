@@ -69,7 +69,7 @@ def _time_window_days(cfg: Optional[dict]) -> int:
     return int(_get(cfg, "decision.time_window_days", _DEFAULTS["decision"]["time_window_days"]))
 
 def _flairs(cfg: Optional[dict]) -> List[str]:
-    # możesz dodać do config.yaml sekcję matcher.flairs jeśli chcesz
+    # Możesz dodać do config.yaml sekcję matcher.flairs jeśli chcesz
     fl = _get(cfg, "matcher.flairs", None)
     if isinstance(fl, list) and fl:
         return fl
@@ -100,7 +100,7 @@ def _fetch_recent_candidates(
     reddit: Any,
     subreddit_name: str,
     window_days: int,
-    limit_per_source: int = 2500,
+    limit_per_source: int = 2500,  # podniesione wg Twojej decyzji
     flairs: Optional[List[str]] = None,
     exclude_post_id: Optional[str] = None,
     exclude_post_url: Optional[str] = None,
@@ -193,6 +193,48 @@ def _make_entry(
 def _empty_report() -> Dict[str, Any]:
     return {"best": None, "top": [], "pool_ids": []}
 
+# ---------- Alias extraction from title ----------
+
+_ALIAS_Q_REGEX = re.compile(r"[\"“”]([^\"“”]{3,80})[\"“”]")
+_ALIAS_CALLED_REGEX = re.compile(
+    r"\b(?:(?:called|titled)\s+|it(?:'s|’s)\s+called\s+)([A-Za-z0-9 \-:'“”\"&]{3,80})",
+    flags=re.I,
+)
+
+def _extract_title_aliases(title: str) -> List[str]:
+    """
+    Zwraca listę aliasów z tytułu – np. z cudzysłowu lub po 'called/titled/it's called'.
+    """
+    if not title:
+        return []
+    txt = title.strip()
+
+    aliases: List[str] = []
+
+    # 1) Cudzysłowy: "..." lub “ … ”
+    for m in _ALIAS_Q_REGEX.finditer(txt):
+        aliases.append(m.group(1).strip())
+
+    # 2) Po słowach kluczowych: called|titled|it's called <ALIAS>
+    kw = _ALIAS_CALLED_REGEX.search(txt)
+    if kw:
+        raw = kw.group(1)
+        # zetnij na pierwszym separatorze / końcu zdania, usuń otaczające cudzysłowy
+        raw = re.split(r"[.;:|/]\s*", raw)[0]
+        raw = raw.strip().strip('“”"')
+        if len(raw) >= 3:
+            aliases.append(raw)
+
+    # Dedup case-insensitive
+    seen = set()
+    out = []
+    for a in aliases:
+        k = a.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(a)
+    return out
+
 # ---------- Public API ----------
 
 def match_title_for_post(
@@ -233,9 +275,9 @@ def match_title(
     config: Optional[dict] = None,
     exclude_post_id: Optional[str] = None,
     exclude_post_url: Optional[str] = None,
-    flair_in: Optional[str] = None,       # accepted, may be unused
-    post_created_utc: Optional[float] = None,  # accepted, may be unused
-    fetch_per_flair: Optional[int] = None,     # accepted, may be unused
+    flair_in: Optional[str] = None,             # accepted, may be unused
+    post_created_utc: Optional[float] = None,   # accepted, may be unused
+    fetch_per_flair: Optional[int] = None,      # accepted, may be unused
 ) -> Dict[str, Any]:
     """
     General entry (adapter-friendly). Works even if some context is missing.
@@ -248,59 +290,81 @@ def match_title(
     window_days = _time_window_days(config)
     flairs = _flairs(config)
 
-    query_norm = _normalize_title(title_raw)
-    if not query_norm:
-        return _empty_report()
+    # Zbuduj warianty: pełny tytuł + aliasy z cudzysłowu/po 'called/titled'
+    title_variants: List[str] = []
+    title_variants.append(title_raw)
+    for alias in _extract_title_aliases(title_raw):
+        if alias.lower() not in [t.lower() for t in title_variants]:
+            title_variants.append(alias)
 
-    # Build pool
+    # Build pool (recent candidates)
     pool = _fetch_recent_candidates(
         reddit=reddit,
         subreddit_name=subreddit,
         window_days=window_days,
-        limit_per_source=2500,
+        limit_per_source=2500,  # zgodnie z Twoim ustawieniem
         flairs=flairs,
         exclude_post_id=exclude_post_id,
         exclude_post_url=exclude_post_url,
     )
 
-    scored: List[Tuple[int, str, Any, str]] = []  # (score, rel, cand, match_type)
-    for cand in pool:
-        try:
-            cand_title = getattr(cand, "title", None) or ""
-            cand_norm = _normalize_title(cand_title)
-            score, mtype = _score_pair(query_norm, cand_norm)
-            rel = _relation(author_name, getattr(getattr(cand, "author", None), "name", None))
-            scored.append((int(score), rel, cand, mtype))
-        except Exception:
-            continue
-
-    if not scored:
-        return _empty_report()
-
-    # sort by score desc, then newest first (if equal)
-    scored.sort(key=lambda t: (t[0], getattr(t[2], "created_utc", 0.0)), reverse=True)
-
-    top_entries: List[Dict[str, Any]] = []
+    # Spróbuj dla każdego wariantu i wybierz najlepszy
+    global_top_entries: List[Dict[str, Any]] = []
     pool_ids: List[str] = []
     best_entry: Optional[Dict[str, Any]] = None
 
-    for i, (score, rel, cand, mtype) in enumerate(scored):
-        certainty = _certainty(score, auto_t, border_t)
-        # Bezpiecznik: 'certain' tylko dla normalized_exact (pełna równość po normalizacji)
-        if mtype != "normalized_exact" and certainty == "certain":
-            certainty = "borderline"
-            
-        entry = _make_entry(score, certainty, rel, mtype, cand)
-        if i < 3:
-            top_entries.append(entry)
-        if best_entry is None:
-            best_entry = entry
-        pid = getattr(cand, "id", None)
-        if pid:
-            pool_ids.append(pid)
+    for title_q in title_variants:
+        query_norm = _normalize_title(title_q)
+        if not query_norm:
+            continue
+
+        scored: List[Tuple[int, str, Any, str]] = []  # (score, rel, cand, match_type)
+        for cand in pool:
+            try:
+                cand_title = getattr(cand, "title", None) or ""
+                cand_norm = _normalize_title(cand_title)
+                score, mtype = _score_pair(query_norm, cand_norm)
+                rel = _relation(author_name, getattr(getattr(cand, "author", None), "name", None))
+                scored.append((int(score), rel, cand, mtype))
+            except Exception:
+                continue
+
+        if not scored:
+            continue
+
+        # sort by score desc, then newest first (if equal)
+        scored.sort(key=lambda t: (t[0], getattr(t[2], "created_utc", 0.0)), reverse=True)
+
+        local_top: List[Dict[str, Any]] = []
+        for i, (score, rel, cand, mtype) in enumerate(scored):
+            certainty = _certainty(score, auto_t, border_t)
+            # Bezpiecznik: 'certain' tylko dla normalized_exact (pełna równość po normalizacji)
+            if mtype != "normalized_exact" and certainty == "certain":
+                certainty = "borderline"
+
+            entry = _make_entry(score, certainty, rel, mtype, cand)
+            if i < 3:
+                local_top.append(entry)
+            if best_entry is None or entry["score"] > best_entry["score"]:
+                best_entry = entry
+
+            pid = getattr(cand, "id", None)
+            if pid:
+                pool_ids.append(pid)
+
+        # dołącz lokalny top (zachowujemy do 3 z każdego wariantu, aby log był informacyjny)
+        global_top_entries.extend(local_top)
+
+    # Przytnij globalny top do 3 najlepszych po score (dla czytelności)
+    if global_top_entries:
+        global_top_entries.sort(key=lambda e: e["score"], reverse=True)
+        global_top_entries = global_top_entries[:3]
+
+    if not best_entry:
+        return _empty_report()
 
     return {
         "best": best_entry,
-        "top": top_entries,
+        "top": global_top_entries,
         "pool_ids": pool_ids,
     }

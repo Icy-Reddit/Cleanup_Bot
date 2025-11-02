@@ -58,7 +58,7 @@ SIMILAR_NOT_SAME_RE = re.compile(
     (?:\bnot\s+(?:the\s+)?same\b.*\b(?:one|drama|movie|series)\b) |
     (?:\bnot\s+(?:this|that)\b.*\b(?:one|drama|movie|series)\b)   |
     (?:\bnot\s+(?:it|the\s+one)\b)                                |
-    (?:\bdifferent\s+(?:one|drama|movie|series)\b)                |
+    (?:\bdifferent\s+(?:one|drama|movie|series|title)\b)                |
     (?:\banother\s+(?:one|drama|movie|series)\b)                  |
     (?:\bsimilar\s+(?:plot|story)\b)                              |
     (?:\bnot\s+(?:the\s+)?same\b.*\bsimilar\b)                    |
@@ -304,3 +304,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

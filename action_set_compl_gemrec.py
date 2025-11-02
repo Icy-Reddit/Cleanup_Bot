@@ -32,7 +32,7 @@ BOT_AUTHORS = {
 
 ELIGIBLE_VIDEO_DOMAINS = {
     "youtube.com", "youtu.be", "dailymotion.com", "rumble.com", "odysee.com",
-    "facebook.com", "fb.watch", # Dodano Facebook/FB.watch
+    "facebook.com", "fb.watch",  # Dodano Facebook/FB.watch
 }
 
 DISALLOWED_DOMAINS = {"mydramalist.com"}
@@ -50,6 +50,22 @@ NO_SUBS_RE = re.compile(
 # Łapie: trailer, teaser, promo, preview, fragment, ad, reklama (ignorujemy 'short')
 TRAILER_AD_RE = re.compile(r"\b(trailer|teaser|promo|preview|fragment|ad|reklama|commercial|advertisement)\b", re.IGNORECASE)
 
+# NOWY: Łapie sformułowania typu "to nie ten sam, tylko podobny" / "similar plot/story"
+# Uwaga: ostrożny - wymaga negacji (not/different/another) w kontekście "one/drama/movie/series"
+# lub jawnych fraz "similar plot"/"similar story".
+SIMILAR_NOT_SAME_RE = re.compile(
+    r"""(?ix)
+    (?:\bnot\s+(?:the\s+)?same\b.*\b(?:one|drama|movie|series)\b) |
+    (?:\bnot\s+(?:this|that)\b.*\b(?:one|drama|movie|series)\b)   |
+    (?:\bnot\s+(?:it|the\s+one)\b)                                |
+    (?:\bdifferent\s+(?:one|drama|movie|series)\b)                |
+    (?:\banother\s+(?:one|drama|movie|series)\b)                  |
+    (?:\bsimilar\s+(?:plot|story)\b)                              |
+    (?:\bnot\s+(?:the\s+)?same\b.*\bsimilar\b)                    |
+    (?:\bsimilar\b.*\bnot\b.*\bsame\b)
+    """,
+    re.IGNORECASE
+)
 
 URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
 
@@ -57,7 +73,6 @@ REQ_DELAY = 0.3  # ostrożne tempo sprawdzania linków
 
 
 # --- POMOCNICZE ---
-# ... (pozostałe funkcje pomocnicze - flair_is_request, is_bot_comment, extract_urls, domain_of)
 def flair_is_request(text: str) -> bool:
     """Zwraca True, jeśli flair zawiera 'request', ale nie 'complete'."""
     if not text:
@@ -93,24 +108,28 @@ def domain_of(url: str) -> str:
 
 
 def comment_disqualifies(text: str) -> bool:
-    """Sprawdza, czy komentarz zawiera flagi 'no subs' lub 'trailer/ad' za pomocą RegEx."""
+    """Sprawdza, czy komentarz zawiera flagi 'no subs', 'trailer/ad' lub 'to nie ten sam tylko podobny'."""
     t = (text or "")
-    
-    # Sprawdzenie flag 'no subs' (wykrywalność 99%)
+
+    # Sprawdzenie flag 'no subs'
     if NO_SUBS_RE.search(t):
         return True
-    
-    # Sprawdzenie flag 'trailer/ad' (wykrywalność 99%)
+
+    # Sprawdzenie flag 'trailer/ad'
     if TRAILER_AD_RE.search(t):
         return True
-        
+
+    # NOWE: Sprawdzenie fraz typu "not the same / similar plot / different one"
+    if SIMILAR_NOT_SAME_RE.search(t):
+        return True
+
     return False
 
-# ... (dalej idą funkcje is_active, get_template_id_for_text, itd.)
 
 def get_reddit():
     import praw
     return praw.Reddit(site_name="Cleanup_Bot")
+
 
 def is_active(u: str) -> bool:
     try:
@@ -122,11 +141,13 @@ def is_active(u: str) -> bool:
     except Exception:
         return False
 
+
 def get_template_id_for_text(sub, text: str):
     for f in sub.flair.link_templates:
         if (f["text"] or "").strip() == text:
             return f["id"]
     return None
+
 
 def require_flair_perms(sub, me):
     mods = {m.name.lower(): m for m in sub.moderator()}
@@ -135,40 +156,36 @@ def require_flair_perms(sub, me):
         raise SystemExit("❌ Bot nie jest moderatorem tego subreddita.")
     # PRAW nie expose'uje granularnie flag, więc sprawdzamy na operacji i łapiemy wyjątek.
 
+
 def is_removed_or_deleted_comment(c) -> bool:
     """Zwróć True, jeśli komentarz jest usunięty przez usera lub moderatora."""
-    # 1) Najpewniejsze sygnały z treści/autora:
     body = (getattr(c, "body", "") or "").strip().lower()
     if body in ("[removed]", "[deleted]"):
         return True
-    if getattr(c, "author", None) is None:  # user skasował konto/komentarz
+    if getattr(c, "author", None) is None:
         return True
 
-    # 2) Pola API, jeśli dostępne:
-    # (w PRAW mogą bywać None/nieobecne — używamy getattr defensywnie)
-    if getattr(c, "banned_by", None):  # historyczne pole, bywa ustawione przy mod-remove
+    if getattr(c, "banned_by", None):
         return True
     if getattr(c, "removal_reason", None):
         return True
     try:
-        # PRAW: c.mod.removal_reason (jeśli mamy uprawnienia moda)
         if hasattr(c, "mod") and getattr(c.mod, "removal_reason", None):
             return True
     except Exception:
         pass
 
-    # 3) Heurystyka po HTML (często Reddit renderuje '[removed]' w body_html)
     html = (getattr(c, "body_html", "") or "").lower()
     if html and "[removed]" in html:
         return True
 
-    # 4) „collapsed_reason” bywa ustawiany przy usunięciach
     for attr in ("collapsed_reason", "collapse_reason", "collapsed_reason_code"):
         val = getattr(c, attr, None)
         if val and "removed" in str(val).lower():
             return True
 
     return False
+
 
 # --- GŁÓWNA LOGIKA ---
 
@@ -205,17 +222,14 @@ def main():
 
         created = datetime.fromtimestamp(s.created_utc, tz=timezone.utc)
         if created < cutoff:
-            # since sub.new() jest posortowane malejąco po czasie, dalej będą tylko starsze
             break
 
         if not flair_is_request(s.link_flair_text):
             continue
 
-        # czy już jest ✅? (gdyby ktoś ręcznie zmienił)
         if (s.link_flair_text or "").strip() == TARGET_FLAIR_TEXT:
             continue
 
-        # przegląd komentarzy nie-botów
         try:
             s.comments.replace_more(limit=0)
         except Exception:
@@ -226,7 +240,7 @@ def main():
             if is_bot_comment(c):
                 continue
             if is_removed_or_deleted_comment(c):
-                continue  # ⬅️ nowy warunek: pomijamy usunięte komentarze
+                continue
 
             body = c.body or ""
             if comment_disqualifies(body):
@@ -256,7 +270,6 @@ def main():
         print("Brak kandydatów spełniających kryteria w zadanym oknie czasu.")
         return
 
-    # sortuj od najnowszych
     candidates.sort(key=lambda x: x[3], reverse=True)
 
     changed = 0
@@ -291,4 +304,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

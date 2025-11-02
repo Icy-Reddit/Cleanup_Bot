@@ -8,6 +8,8 @@ import re
 import unicodedata
 from typing import Dict, List, Set
 
+# ----------------------------- Słowniki / wzorce -----------------------------
+
 # Słowa nie-niosące informacji (po normalizacji, lower-case)
 GENERIC_STOPWORDS: Set[str] = {
     # ogólne prośby/słowa serwisowe
@@ -41,10 +43,14 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\b(title|name)\b.*\blink\b", re.I),
     re.compile(r"\blooking\s+for\b", re.I),
     re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
+    re.compile(r"\bdoes\s+anyone\s+know\s+(its|the)\s+name\b", re.I),
+    re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
 STRICT_FLAIRS = {"📌 Link Request"}
+
+# ----------------------------- Normalizacja / tokeny -----------------------------
 
 def _nfkc(s: str) -> str:
     return unicodedata.normalize("NFKC", s)
@@ -67,13 +73,15 @@ def _ltoken(t: str) -> str:
 def _informative_tokens(tokens: List[str]) -> List[str]:
     return [t for t in map(_ltoken, tokens) if t not in GENERIC_STOPWORDS and len(t) >= 2]
 
+# ----------------------------- Heurystyki wykrywania -----------------------------
+
 def _has_strong_signal(tokens: List[str]) -> bool:
     """
     Silne sygnały, że tytuł niesie konkretną informację:
+    - znaki CJK (często prawdziwa nazwa),
     - numer identyfikacyjny / rok / 4+ cyfry (np. 11735),
     - mix liter i cyfr (np. s02e03, ep10),
-    - obecność co najmniej 2 sensownych tokenów >=4 znaków po odcięciu stopwordów,
-    - znaki CJK (często prawdziwa nazwa).
+    - co najmniej 2 sensowne tokeny (>=4 znaki) po odcięciu stopwordów.
     """
     s = " ".join(tokens)
     if re.search(r"[\u4e00-\u9fff\u3040-\u30ff]", s):
@@ -87,38 +95,27 @@ def _has_strong_signal(tokens: List[str]) -> bool:
         return True
     return False
 
-def _looks_like_generic_request(raw: str) -> bool:
-    return any(p.search(raw) for p in GENERIC_TITLE_PATTERNS)
-
-def _token_is_hyphen_title(t: str) -> bool:
-    # np. "stand-in", "re-born"
-    return bool(re.fullmatch(r"[A-Za-z]{2,}-[A-Za-z]{2,}", t))
+def _token_is_hyphen_title(tok: str) -> bool:
+    # np. "Stand-in", "Re-born" — myślnik w rdzeniu, nie prefiks/sufiks
+    return bool(re.fullmatch(r"[A-Za-z]{2,}\-[A-Za-z]{2,}", tok))
 
 def _titlecase_ratio(tokens: List[str]) -> float:
-    """Udział słów wyglądających jak Title Case (pierwsza litera duża, reszta małe)."""
-    words = [t for t in tokens if re.search(r"[A-Za-z]", t)]
-    if not words:
+    if not tokens:
         return 0.0
-    def is_title(w: str) -> bool:
-        # sprawdź także segmenty po myślniku
-        parts = w.split("-")
-        ok_parts = 0
-        total = 0
-        for p in parts:
-            if not re.search(r"[A-Za-z]", p):
-                continue
-            total += 1
-            ok_parts += p[:1].isupper() and p[1:].islower()
-        if total == 0:
-            return False
-        # uznaj za TitleCase jeśli większość segmentów spełnia warunek
-        return (ok_parts / total) >= 0.5
-    hits = sum(1 for w in words if is_title(w))
-    return hits / len(words)
+    tc = 0
+    for t in tokens:
+        if len(t) >= 2 and t[0].isalpha() and t[0].upper() == t[0]:
+            tc += 1
+    return tc / max(1, len(tokens))
 
 def _has_suspect_word(tokens: List[str]) -> bool:
     tl = [t.lower() for t in tokens]
     return any(t in SUSPECT_HINTS for t in tl)
+
+def _looks_like_generic_request(s_norm: str) -> bool:
+    return any(p.search(s_norm) for p in GENERIC_TITLE_PATTERNS)
+
+# ----------------------------- Inquiry: generica -----------------------------
 
 def is_generic_inquiry(title: str) -> bool:
     """
@@ -152,6 +149,42 @@ def is_generic_inquiry(title: str) -> bool:
 
     return False
 
+# ----------------------------- Link Request: generica -----------------------------
+
+def _looks_like_generic_placeholder(title: str) -> bool:
+    """
+    Wykrywa puste/ogólne tytuły typu: 'Does anyone know its name?', 'Please link', 'Need title', itp.
+    Zostawia wyjątki (CJK / 4+ cyfry / s02e03 / ep12 / tytuł w cudzysłowie), które sugerują konkretny trop.
+    """
+    if not title:
+        return True
+
+    t_raw = title.strip()
+    t_norm = _normalize_text(t_raw)
+    toks = _tokens(t_norm)
+
+    # ----- mocne wyjątki (NIE oznaczamy jako generic) -----
+    if not toks:
+        return True  # puste po normalizacji
+    if _has_strong_signal(toks):
+        return False
+    # tytuł w cudzysłowie (np. "Love Beyond Fate")
+    if re.search(r"[\"“][^\"“]{3,}?[\"”]", t_raw):
+        return False
+
+    # ----- klasyczne puste wzorce -----
+    if _looks_like_generic_request(t_norm):
+        return True
+
+    # bardzo mało treści informacyjnej (≤2 tokeny sensowne) + podejrzane słowa
+    informative = _informative_tokens(toks)
+    if len(informative) <= 2 and _has_suspect_word(toks):
+        return True
+
+    return False
+
+# ----------------------------- Walidator główny -----------------------------
+
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
     """
     Zwraca dict: {"status": "OK|AMBIGUOUS|MISSING", "reason": "<krótki_powód>"}.
@@ -165,6 +198,12 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     flair = (flair or "").strip()
     title_raw = (title or "").strip()
 
+    # 📌 Link Request → najpierw odsień „puste/generic” tytuły
+    if flair == "📌 Link Request":
+        if _looks_like_generic_placeholder(title_raw):
+            return {"status": "MISSING", "reason": "generic_placeholder"}
+
+    # Puste pozycje łapiemy zawsze
     if not title_raw:
         return {"status": "MISSING", "reason": "empty_title"}
 
@@ -175,7 +214,7 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
 
     informative = _informative_tokens(toks)
 
-    # Sztywne „puste prośby”, jeśli brak silnych sygnałów
+    # Sztywne „puste prośby” dla ścisłych flairów, jeśli brak silnych sygnałów
     if flair in STRICT_FLAIRS:
         if _looks_like_generic_request(title_norm) and not _has_strong_signal(toks):
             return {"status": "MISSING", "reason": "generic_title"}

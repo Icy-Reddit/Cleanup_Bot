@@ -3,18 +3,21 @@ import io
 import json
 import os
 import sqlite3
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 import PIL.Image as Image
+from PIL import ImageFile
 import requests
 import yaml
 import praw
 import imagehash
+from html import unescape
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-# ---------- Utils ----------
+# ---------- Config & FS ----------
 
 def load_config(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -25,12 +28,12 @@ def ensure_dirs(cfg):
     os.makedirs(os.path.dirname(cfg["paths"]["state_file"]), exist_ok=True)
     os.makedirs(cfg["paths"]["reports_dir"], exist_ok=True)
 
-def utc_ts(dt_str: str):
-    # "YYYY-MM-DD" or ISO
-    return int(datetime.fromisoformat(dt_str).replace(tzinfo=timezone.utc).timestamp())
-
-def now_utc():
+def now_utc_ts():
     return int(datetime.now(timezone.utc).timestamp())
+
+def utc_ts(dt_str: str):
+    # "YYYY-MM-DD" lub pełny ISO
+    return int(datetime.fromisoformat(dt_str).replace(tzinfo=timezone.utc).timestamp())
 
 def load_state(state_path):
     if os.path.exists(state_path):
@@ -45,64 +48,127 @@ def save_state(state_path, state):
 def get_praw(cfg):
     return praw.Reddit(site_name=cfg["reddit"]["praw_site"])
 
-def best_image_url(subm):
-    # 1) gallery
+
+# ---------- URL selection ----------
+
+def _pick_res_preview(preview_dict, wanted_width):
+    """
+    Zwraca najlepszy URL z preview.resolutions o szerokości <= wanted_width,
+    a jeśli brak – największy dostępny.
+    """
+    try:
+        imgs = preview_dict.get("images")
+        if not imgs:
+            return None
+        p0 = imgs[0]
+        res_list = p0.get("resolutions", [])
+        chosen = None
+        # wybierz największą <= wanted_width
+        for r in res_list:
+            if r.get("width", 0) <= wanted_width:
+                if (chosen is None) or (r["width"] > chosen["width"]):
+                    chosen = r
+        if chosen is None:
+            # fallback: źródło (może być duże)
+            chosen = p0.get("source")
+        if chosen and "url" in chosen:
+            return chosen["url"]
+    except Exception:
+        return None
+    return None
+
+def best_image_url(subm, max_width=None):
+    """
+    Zwraca najlepszy możliwy URL obrazka. Jeżeli max_width podany, preferuje preview.resolutions <= max_width.
+    """
+    url = None
+
+    # 1) gallery (pierwszy element)
     if getattr(subm, "is_gallery", False) and getattr(subm, "media_metadata", None):
         try:
             first = next(iter(subm.media_metadata.values()))
             if "s" in first and "u" in first["s"]:
-                return first["s"]["u"]
+                url = first["s"]["u"]
         except Exception:
             pass
 
-    # 2) preview highest quality
-    try:
-        if subm.preview and subm.preview.get("images"):
-            src = subm.preview["images"][0]["source"]["url"]
-            return src
-    except Exception:
-        pass
+    # 2) preview (preferowane resolutions z limitem szerokości)
+    if url is None:
+        try:
+            if subm.preview:
+                if max_width:
+                    cand = _pick_res_preview(subm.preview, wanted_width=max_width)
+                    if cand:
+                        url = cand
+                if url is None:
+                    # jeśli nie znaleziono sensownej resolucji – bierz source
+                    imgs = subm.preview.get("images")
+                    if imgs:
+                        url = imgs[0]["source"]["url"]
+        except Exception:
+            pass
 
     # 3) direct override
-    if getattr(subm, "url_overridden_by_dest", None):
-        return subm.url_overridden_by_dest
+    if url is None and getattr(subm, "url_overridden_by_dest", None):
+        url = subm.url_overridden_by_dest
 
-    # 4) video thumb (v.redd.it)
-    try:
-        if subm.media and "reddit_video" in subm.media:
-            if subm.preview and subm.preview.get("images"):
-                return subm.preview["images"][0]["source"]["url"]
-    except Exception:
-        pass
+    # 4) video thumb (v.redd.it) przez preview
+    if url is None:
+        try:
+            if subm.media and "reddit_video" in subm.media:
+                if subm.preview and subm.preview.get("images"):
+                    url = subm.preview["images"][0]["source"]["url"]
+        except Exception:
+            pass
 
     # 5) thumbnail fallback
-    if getattr(subm, "thumbnail", None) and subm.thumbnail.startswith("http"):
-        return subm.thumbnail
+    if url is None and getattr(subm, "thumbnail", None) and str(subm.thumbnail).startswith("http"):
+        url = subm.thumbnail
 
-    return None
+    if url:
+        # unescape & encje
+        url = unescape(url).replace("&amp;", "&")
+    return url
+
+
+# ---------- Network & image ----------
 
 def fetch_image_bytes(url, timeout, max_bytes):
     headers = {"User-Agent": "PosterIndexer/1.0"}
-    r = requests.get(url, timeout=timeout, stream=True, headers=headers)
-    r.raise_for_status()
-    data = io.BytesIO()
-    size = 0
-    for chunk in r.iter_content(8192):
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > max_bytes:
-            raise ValueError("image too large")
-        data.write(chunk)
-    return data.getvalue()
+    with requests.get(url, timeout=timeout, stream=True, headers=headers, allow_redirects=True) as r:
+        r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "").lower()
+        if not ctype.startswith("image/"):
+            raise ValueError(f"not_an_image content-type={ctype}")
+        if any(fmt in ctype for fmt in ("image/avif", "image/svg", "image/svg+xml")):
+            raise ValueError(f"unsupported_image_format content-type={ctype}")
+        data = io.BytesIO()
+        size = 0
+        for chunk in r.iter_content(8192):
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                raise ValueError("image too large")
+            data.write(chunk)
+        return data.getvalue()
 
 def open_image_safely(raw_bytes):
-    img = Image.open(io.BytesIO(raw_bytes))
-    img = img.convert("RGB")
-    return img
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        img = img.convert("RGB")
+        return img
+    except Exception as e:
+        raise ValueError(f"pillow_open_failed: {e}")
+
+def should_keep_image(img: Image.Image, cfg):
+    w, h = img.size
+    return (w >= cfg["indexing"]["min_width"]) and (h >= cfg["indexing"]["min_height"])
+
+
+# ---------- Features ----------
 
 def compute_hsv_hist(img: Image.Image):
-    # bins: H=16, S=4, V=4 => 256 dims
     hsv = img.convert("HSV")
     arr = np.array(hsv, dtype=np.uint8)
     h, s, v = arr[..., 0], arr[..., 1], arr[..., 2]
@@ -113,14 +179,13 @@ def compute_hsv_hist(img: Image.Image):
     )
     hist = hist.astype(np.float32)
     hist /= (hist.sum() + 1e-9)
-    # L2 norm (for późniejszej korelacji)
+    # L2 norm
     norm = np.linalg.norm(hist)
     if norm > 0:
         hist = hist / norm
     return hist
 
 def compute_hashes(img: Image.Image):
-    # opcjonalne skalowanie do rozsądnej szerokości (przyspieszenie)
     max_side = 1024
     if max(img.size) > max_side:
         img = img.copy()
@@ -130,22 +195,24 @@ def compute_hashes(img: Image.Image):
     ph8  = imagehash.phash(img, hash_size=8)
     dh16 = imagehash.dhash(img, hash_size=16)
     wh   = imagehash.whash(img, hash_size=16, image_scale=None, mode='haar')
-    # center crop 80%
+
     w, h = img.size
     cw, ch = int(w*0.8), int(h*0.8)
     cx, cy = (w - cw)//2, (h - ch)//2
     ctr = img.crop((cx, cy, cx+cw, cy+ch))
     ctr_ph16 = imagehash.phash(ctr, hash_size=16)
+
     hsv_hist = compute_hsv_hist(img)
 
     return {
-        "phash16": ph16.__str__(),
-        "phash8":  ph8.__str__(),
-        "dhash16": dh16.__str__(),
-        "whash":   wh.__str__(),
-        "center_phash16": ctr_ph16.__str__(),
+        "phash16": str(ph16),
+        "phash8":  str(ph8),
+        "dhash16": str(dh16),
+        "whash":   str(wh),
+        "center_phash16": str(ctr_ph16),
         "hsv_hist": hsv_hist.tobytes()
     }
+
 
 # ---------- DB ----------
 
@@ -197,21 +264,18 @@ def db_upsert(conn, rec):
           meta_json=excluded.meta_json
     """, rec)
 
-# ---------- Reddit scan ----------
+
+# ---------- Scan ----------
 
 def iter_new_until_window(subreddit, since_ts, until_ts=None):
-    # PRAW nie ma time-range, więc iterujemy .new() i break po dacie
-    for subm in subreddit.new(limit=None):
-        if until_ts and subm.created_utc > until_ts:
-            # nowe, jeszcze nowsze — jedziemy dalej
+    # iterujemy po .new() i zatrzymujemy się na dolnym progu czasu
+    for s in subreddit.new(limit=None):
+        if until_ts and s.created_utc > until_ts:
+            # bardzo nowe — jedziemy dalej
             pass
-        if since_ts and subm.created_utc < since_ts:
+        if since_ts and s.created_utc < since_ts:
             break
-        yield subm
-
-def should_keep_image(img: Image.Image, cfg):
-    w, h = img.size
-    return (w >= cfg["indexing"]["min_width"]) and (h >= cfg["indexing"]["min_height"])
+        yield s
 
 def run_index(cfg, since_ts, until_ts):
     ensure_dirs(cfg)
@@ -225,14 +289,39 @@ def run_index(cfg, since_ts, until_ts):
         since_ts = last_indexed
 
     count, new_last = 0, last_indexed
+    max_w = cfg.get("download", {}).get("max_width", 1280)
+    fb_w  = cfg.get("download", {}).get("fallback_width", 720)
 
     for s in iter_new_until_window(sub, since_ts, until_ts):
-        url = best_image_url(s)
+        url = best_image_url(s, max_width=max_w)
         if not url:
             continue
 
         try:
             raw = fetch_image_bytes(url, cfg["indexing"]["timeout_sec"], cfg["indexing"]["max_image_bytes"])
+        except ValueError as e:
+            msg = str(e)
+            if "image too large" in msg:
+                # spróbuj mniejszej rozdzielczości z preview
+                fb_url = best_image_url(s, max_width=fb_w)
+                if fb_url and fb_url != url:
+                    try:
+                        raw = fetch_image_bytes(fb_url, cfg["indexing"]["timeout_sec"], cfg["indexing"]["max_image_bytes"])
+                        url = fb_url
+                    except Exception as e2:
+                        print(f"[WARN] {s.id} {type(e2).__name__}: {e2} url={fb_url}")
+                        continue
+                else:
+                    print(f"[WARN] {s.id} {type(e).__name__}: {e} url={url}")
+                    continue
+            else:
+                print(f"[WARN] {s.id} {type(e).__name__}: {e} url={url}")
+                continue
+        except Exception as e:
+            print(f"[WARN] {s.id} {type(e).__name__}: {e} url={url}")
+            continue
+
+        try:
             img = open_image_safely(raw)
             if not should_keep_image(img, cfg):
                 continue
@@ -258,10 +347,9 @@ def run_index(cfg, since_ts, until_ts):
             db_upsert(conn, rec)
             count += 1
             new_last = max(new_last, rec["created_utc"])
-
         except Exception as e:
-            # Pomijamy błędne przypadki, ale nie przerywamy całego batcha
-            print(f"[WARN] {s.id} {e}")
+            print(f"[WARN] {s.id} {type(e).__name__}: {e} url={url}")
+            continue
 
     conn.commit()
     conn.close()
@@ -271,6 +359,7 @@ def run_index(cfg, since_ts, until_ts):
         save_state(cfg["paths"]["state_file"], state)
 
     print(f"[INFO] Indexed records: {count}; last_indexed_utc={state['last_indexed_utc']}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -290,9 +379,10 @@ def main():
         until_ts = utc_ts(args.until)
     if args.delta:
         hours = int(args.delta.lower().replace("h", ""))
-        since_ts = now_utc() - hours * 3600
+        since_ts = now_utc_ts() - hours * 3600
 
     run_index(cfg, since_ts, until_ts)
+
 
 if __name__ == "__main__":
     main()

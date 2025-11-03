@@ -82,7 +82,8 @@ SIMILAR_NOT_SAME_RE = re.compile(
     (?:\bsimilar\s+(?:plot|story)\b)                              |
     (?:\bsimilar\b)                                               |  # standalone "similar" dyskwalifikuje
     (?:\bnot\s+(?:the\s+)?same\b.*\bsimilar\b)                    |
-    (?:\bsimilar\b.*\bnot\b.*\bsame\b)
+    (?:\bversion\b) |
+    (?:\bsimilar\b.*\bnot\b.*\bsame\b) |
     """
 )
 
@@ -303,3 +304,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

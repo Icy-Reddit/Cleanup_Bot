@@ -33,7 +33,7 @@ BOT_AUTHORS = {
 
 ELIGIBLE_VIDEO_DOMAINS = {
     "youtube.com", "youtu.be", "dailymotion.com", "rumble.com", "odysee.com",
-    "facebook.com", "fb.watch",
+    "facebook.com", "fb.watch", "reelxia.com",
 }
 
 DISALLOWED_DOMAINS = {
@@ -308,5 +308,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

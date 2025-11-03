@@ -1,0 +1,53 @@
+name: Poster Index Daily
+
+on:
+  schedule:
+    - cron: "5 6 * * *"  # codziennie 06:05 UTC
+  workflow_dispatch: {}
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore poster index cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            poster_matcher/data
+            poster_matcher/cache
+          key: poster-index-v1-${{ runner.os }}-${{ date('YYYY-ww') }}
+
+      - name: Ensure praw.ini
+        run: |
+          mkdir -p ~/.config/praw
+          echo "[${{ secrets.PRAW_SITE || 'Cleanup_Bot' }}]
+client_id=${{ secrets.REDDIT_CLIENT_ID }}
+client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
+username=${{ secrets.REDDIT_USERNAME }}
+password=${{ secrets.REDDIT_PASSWORD }}
+user_agent=${{ secrets.USER_AGENT || 'Cleanup_Bot PosterMatcher/1.0' }}
+" > ~/.config/praw/praw.ini
+
+      - name: Build/Update index (delta 48h)
+        run: |
+          python poster_matcher/poster_indexer.py --delta 48h --config poster_matcher/config.yaml
+
+      - name: Upload index artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: poster-index-sqlite
+          path: poster_matcher/data/poster_index.sqlite
+          if-no-files-found: ignore

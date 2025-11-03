@@ -107,7 +107,7 @@ def _fetch_recent_candidates(
 ) -> List[Any]:
     """
     Build a recent candidate pool from subreddit, filtered by time window and flair.
-    Uses /new() only — najprostsze i wystarczające (modqueue pobierasz gdzie indziej).
+    Uses /new() + mod queque  — najprostsze i wystarczające (modqueue pobierasz gdzie indziej).
     """
     flairs = flairs or _flairs(None)
     out: List[Any] = []
@@ -161,7 +161,7 @@ def _fetch_recent_candidates(
                 except Exception:
                     continue
         except Exception:
-            pass                 
+            pass
     except Exception:
         # reddit or network error — return whatever we have (likely empty)
         return out

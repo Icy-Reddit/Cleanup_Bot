@@ -1,37 +1,87 @@
+# =========================
+# Poster Matcher – Config
+# =========================
+# Używany przez:
+#   poster_matcher/poster_indexer.py
+#   poster_matcher/poster_matcher.py
+# Obsługuje codzienny indeks obrazów (indexer)
+# i dopasowywanie postów z flairem Link Request (matcher).
+
 reddit:
+  # nazwa sekcji w praw.ini (w .config/praw/praw.ini lub ~/.config/praw/praw.ini)
   praw_site: "Cleanup_Bot"
+  # subreddit, który przetwarzamy
   subreddit: "CShortDramas"
 
 paths:
+  # baza danych z hashami obrazów (SQLite)
   index_db: "poster_matcher/data/poster_index.sqlite"
+  # plik z ostatnim przetworzonym timestampem
   state_file: "poster_matcher/cache/state.json"
+  # katalog, gdzie trafiają raporty CSV/JSONL
   reports_dir: "poster_matcher/reports"
 
+# --------------------------------------
+# Ustawienia indeksowania (poster_indexer)
+# --------------------------------------
 indexing:
+  # ile dni wstecz trzymamy dane w indeksie (kandydaci do porównań)
   lookback_days: 90
+
+  # minimalne wymiary obrazu, aby policzyć hash
   min_width: 320
   min_height: 320
+
+  # maksymalny rozmiar pliku (8 MB)
   max_image_bytes: 8000000
+
+  # maksymalny czas pobierania obrazu (sekundy)
   timeout_sec: 12
+
+  # identyfikacja w nagłówkach HTTP
   user_agent: "Cleanup_Bot PosterMatcher/1.0"
 
+# --------------------------------------
+# Pobieranie obrazów – preferencje jakości
+# --------------------------------------
 download:
-  max_width: 1280      # preferowana szerokość z preview.resolutions
-  fallback_width: 720  # fallback gdy oryginał zbyt duży
+  # preferowana szerokość z preview.resolutions
+  max_width: 1280
+  # fallbackowa szerokość, jeśli powyższa jest zbyt duża lub brak preview
+  fallback_width: 720
 
+# --------------------------------------
+# Dopasowania (poster_matcher)
+# --------------------------------------
 matching:
+  # ile godzin wstecz skanować nowe posty LR
   lr_window_hours: 24
+
+  # dozwolone flairy (różne wersje "Link Request")
   flair_allow:
     - "Link Request"
     - "📌 Link Request"
+
+  # shortlist – szybkie filtrowanie kandydatów
   shortlist:
+    # maksymalna liczba kandydatów po shortlistingu
     max_candidates: 300
+    # maksymalny dystans phash16, aby kandydat trafił do shortlisty
     phash16_max_dist: 20
+    # minimalna korelacja HSV, aby kandydat trafił do shortlisty
     hsv_min_corr: 0.85
+
+  # progi decyzyjne dla łącznego wyniku ensemble
   thresholds:
+    # pewne dopasowanie (CERTAIN)
     certain: 0.85
+    # możliwe dopasowanie (UNSURE)
     unsure: 0.72
+
+  # ile najlepszych kandydatów zapisać w JSONL
   topk: 5
+
+  # wagi poszczególnych cech w ensemble score
   weights:
     phash16: 0.30
     phash8: 0.10

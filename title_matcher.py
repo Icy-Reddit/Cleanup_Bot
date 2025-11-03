@@ -115,6 +115,8 @@ def _fetch_recent_candidates(
         sub = reddit.subreddit(subreddit_name)
         now = _utc_now()
         min_ts = now - window_days * 86400
+        
+        # źródło 1
         for s in sub.new(limit=limit_per_source):
             try:
                 # time filter
@@ -132,6 +134,34 @@ def _fetch_recent_candidates(
                 out.append(s)
             except Exception:
                 continue
+        
+        # --- źródło 2: Mod Queue (dodatkowe kandydaty) ---
+        seen_ids = {getattr(s, "id", None) for s in out}
+        try:
+            for s in sub.mod.modqueue(limit=limit_per_source):
+                try:
+                    # time filter
+                    if getattr(s, "created_utc", 0.0) < min_ts:
+                        continue
+                    # flair filter (string match on link_flair_text)
+                    lf = getattr(s, "link_flair_text", None) or ""
+                    if lf not in flairs:
+                        continue
+                    # exclude current post
+                    if exclude_post_id and getattr(s, "id", None) == exclude_post_id:
+                        continue
+                    if exclude_post_url and getattr(s, "permalink", None) == exclude_post_url:
+                        continue
+                    sid = getattr(s, "id", None)
+                    if sid and sid in seen_ids:
+                        continue
+                    out.append(s)
+                    if sid:
+                        seen_ids.add(sid)
+                except Exception:
+                    continue
+        except Exception:
+            pass                 
     except Exception:
         # reddit or network error — return whatever we have (likely empty)
         return out

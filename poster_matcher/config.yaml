@@ -1,0 +1,37 @@
+reddit:
+  praw_site: "Cleanup_Bot"   # sekcja w praw.ini
+  subreddit: "CShortDramas"  # główny sub
+
+paths:
+  index_db: "poster_matcher/data/poster_index.sqlite"
+  state_file: "poster_matcher/cache/state.json"
+  reports_dir: "poster_matcher/reports"
+
+indexing:
+  lookback_days: 90
+  min_width: 320
+  min_height: 320
+  max_image_bytes: 8000000
+  timeout_sec: 12
+  user_agent: "Cleanup_Bot PosterMatcher/1.0"
+
+matching:
+  lr_window_hours: 24
+  flair_allow:
+    - "Link Request"
+    - "📌 Link Request"
+  shortlist:
+    max_candidates: 300
+    phash16_max_dist: 20
+    hsv_min_corr: 0.85
+  thresholds:
+    certain: 0.85
+    unsure: 0.72
+  topk: 5
+  weights:
+    phash16: 0.30
+    phash8: 0.10
+    dhash16: 0.15
+    whash: 0.15
+    center: 0.10
+    hsv: 0.20

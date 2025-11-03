@@ -45,6 +45,11 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
     re.compile(r"\bdoes\s+anyone\s+know\s+(its|the)\s+name\b", re.I),
     re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
+
+    # --- NOWE wzorce: „where … watch/find” ---
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),   # where (can i) watch
+    re.compile(r"\bwhere\s+to\s+watch\b", re.I),              # where to watch
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),    # where (can i) find
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)

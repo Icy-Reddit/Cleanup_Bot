@@ -6,8 +6,9 @@ Zasady:
 - Źródło: sub.new() filtrowane po czasie (domyślnie --days 3: dziś/wczoraj/przedwczoraj).
 - Flair: luźne "request" w tekście flaira, WYKLUCZA "complete".
 - Liczą się TYLKO linki z KOMENTARZY nie-botów (selftext ignorujemy).
-- Dozwolone domeny wideo: YouTube / youtu.be / Dailymotion / Rumble / Odysee.
-- Odrzuć: mydramalist.com i komentarze z: raw / no subs / not subbed / without subs / no english.
+- Dozwolone domeny wideo: YouTube / youtu.be / Dailymotion / Rumble / Odysee / Facebook.
+- Odrzuć: mydramalist.com oraz komentarze ze słowami-kluczami: raw / no subs / unsubbed / similar / different / no soundtrack.
+- Komentarz może zawierać TEKST i WIELE linków; bot wybiera pierwszy działający link z dozwolonej domeny.
 - Każdy kandydat wymaga potwierdzenia (--interactive) lub globalnego --confirm.
 
 Wymaga: bot jako moderator z uprawnieniem "Flair Posts".
@@ -32,45 +33,63 @@ BOT_AUTHORS = {
 
 ELIGIBLE_VIDEO_DOMAINS = {
     "youtube.com", "youtu.be", "dailymotion.com", "rumble.com", "odysee.com",
-    "facebook.com", "fb.watch",  # Dodano Facebook/FB.watch
+    "facebook.com", "fb.watch",
 }
 
 DISALLOWED_DOMAINS = {"mydramalist.com"}
 
+# --- REGEXY ---
 
-# NOWE WZORCE REGEX DLA MAKSYMALNEJ WYKRYWALNOŚCI
-# Łapie: no eng sub/subs, without subs, raw only, raw, only mandarin/chinese, no english, un-subbed, no translation
+# No-subs / raw / bez dźwięku (rozszerzone o warianty i "no soundtrack")
 NO_SUBS_RE = re.compile(
-    r"\b(no\s*(eng(?:lish)?)?\s*subs?|not\s*subbed|without\s*(eng(?:lish)?)?\s*subs?|raw(?:\s*only)?|"
-    r"mandarin\s*only|chinese\s*only|cn\s*only|no\s*english|doesn.?t\s*have\s*english\s*sub|"
-    r"subs?\s*not\s*available|unsubbed|no\s*translation)\b",
+    r"""(?ix)
+    \b(
+        no\s*(eng(?:lish)?)?\s*subs?           |  # no subs / no english subs
+        not\s*subbed                            |
+        without\s*(eng(?:lish)?)?\s*subs?       |
+        un[-\s]?subbed                           |  # un-subbed / un subbed / unsubbed
+        raw(?:\s*only)?                          |
+        mandarin\s*only                          |
+        chinese\s*only                           |
+        cn\s*only                                |
+        no\s*english                             |
+        doesn.?t\s*have\s*english\s*sub          |
+        subs?\s*not\s*available                  |
+        no\s*sound(track)?                       |  # no sound / no soundtrack
+        no\s*audio                               |
+        muted\s*audio                            |
+        no\s*translation
+    )\b
+    """
+)
+
+# Trailery / reklamy
+TRAILER_AD_RE = re.compile(
+    r"\b(trailer|teaser|promo|preview|fragment|ad|reklama|commercial|advertisement)\b",
     re.IGNORECASE
 )
 
-# Łapie: trailer, teaser, promo, preview, fragment, ad, reklama (ignorujemy 'short')
-TRAILER_AD_RE = re.compile(r"\b(trailer|teaser|promo|preview|fragment|ad|reklama|commercial|advertisement)\b", re.IGNORECASE)
-
-# NOWY: Łapie sformułowania typu "to nie ten sam, tylko podobny" / "similar plot/story"
-# Uwaga: ostrożny - wymaga negacji (not/different/another) w kontekście "one/drama/movie/series"
-# lub jawnych fraz "similar plot"/"similar story".
+# „To nie ten sam / podobny / inna wersja/tytuł” (rozszerzone + standalone 'similar')
 SIMILAR_NOT_SAME_RE = re.compile(
     r"""(?ix)
     (?:\bnot\s+(?:the\s+)?same\b.*\b(?:one|drama|movie|series)\b) |
     (?:\bnot\s+(?:this|that)\b.*\b(?:one|drama|movie|series)\b)   |
     (?:\bnot\s+(?:it|the\s+one)\b)                                |
-    (?:\bdifferent\s+(?:one|drama|movie|series|title)\b)                |
-    (?:\banother\s+(?:one|drama|movie|series)\b)                  |
+    (?:\ba?different\s+(?:one|drama|movie|series|title|version|cut|edit)\b) |
+    (?:\banother\s+(?:one|drama|movie|series|title|version|cut|edit)\b)     |
+    (?:\balt(?:ernate|ernative)?\s+version\b)                     |
+    (?:\bdifferent\s+title\b)                                     |
     (?:\bsimilar\s+(?:plot|story)\b)                              |
+    (?:\bsimilar\b)                                               |  # standalone "similar" dyskwalifikuje
     (?:\bnot\s+(?:the\s+)?same\b.*\bsimilar\b)                    |
     (?:\bsimilar\b.*\bnot\b.*\bsame\b)
-    """,
-    re.IGNORECASE
+    """
 )
 
+# URL-e w tekście
 URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
 
 REQ_DELAY = 0.3  # ostrożne tempo sprawdzania linków
-
 
 # --- POMOCNICZE ---
 def flair_is_request(text: str) -> bool:
@@ -80,18 +99,15 @@ def flair_is_request(text: str) -> bool:
     t = text.lower()
     return "request" in t and "complete" not in t
 
-
 def is_bot_comment(c) -> bool:
     """Sprawdza, czy komentarz pochodzi od znanego bota."""
     if not c.author:
         return False
     return (c.author.name or "").lower() in BOT_AUTHORS
 
-
 def extract_urls(text: str):
     """Zwraca listę wszystkich URL-i w tekście."""
     return URL_RE.findall(text or "")
-
 
 def domain_of(url: str) -> str:
     """Zwraca domenę (bez www) z adresu URL."""
@@ -106,30 +122,19 @@ def domain_of(url: str) -> str:
     except Exception:
         return ""
 
-
 def comment_disqualifies(text: str) -> bool:
-    """Sprawdza, czy komentarz zawiera flagi 'no subs', 'trailer/ad' lub 'to nie ten sam tylko podobny'."""
+    """True, jeśli komentarz zawiera 'no subs' / 'trailer/ad' / 'not the same/similar/different'."""
     t = (text or "")
-
-    # Sprawdzenie flag 'no subs'
     if NO_SUBS_RE.search(t):
         return True
-
-    # Sprawdzenie flag 'trailer/ad'
     if TRAILER_AD_RE.search(t):
         return True
-
-    # NOWE: Sprawdzenie fraz typu "not the same / similar plot / different one"
     if SIMILAR_NOT_SAME_RE.search(t):
         return True
-
     return False
 
-
 def get_reddit():
-    import praw
     return praw.Reddit(site_name="Cleanup_Bot")
-
 
 def is_active(u: str) -> bool:
     try:
@@ -141,21 +146,18 @@ def is_active(u: str) -> bool:
     except Exception:
         return False
 
-
 def get_template_id_for_text(sub, text: str):
     for f in sub.flair.link_templates:
         if (f["text"] or "").strip() == text:
             return f["id"]
     return None
 
-
 def require_flair_perms(sub, me):
     mods = {m.name.lower(): m for m in sub.moderator()}
     mine = mods.get((me or "").lower())
     if not mine:
         raise SystemExit("❌ Bot nie jest moderatorem tego subreddita.")
-    # PRAW nie expose'uje granularnie flag, więc sprawdzamy na operacji i łapiemy wyjątek.
-
+    # PRAW nie expose'uje granularnie flag; sprawdzamy na operacji.
 
 def is_removed_or_deleted_comment(c) -> bool:
     """Zwróć True, jeśli komentarz jest usunięty przez usera lub moderatora."""
@@ -164,7 +166,6 @@ def is_removed_or_deleted_comment(c) -> bool:
         return True
     if getattr(c, "author", None) is None:
         return True
-
     if getattr(c, "banned_by", None):
         return True
     if getattr(c, "removal_reason", None):
@@ -174,21 +175,16 @@ def is_removed_or_deleted_comment(c) -> bool:
             return True
     except Exception:
         pass
-
     html = (getattr(c, "body_html", "") or "").lower()
     if html and "[removed]" in html:
         return True
-
     for attr in ("collapsed_reason", "collapse_reason", "collapsed_reason_code"):
         val = getattr(c, attr, None)
         if val and "removed" in str(val).lower():
             return True
-
     return False
 
-
 # --- GŁÓWNA LOGIKA ---
-
 def main():
     ap = argparse.ArgumentParser(description="Ustawianie ✅ Request Complete dla świeżych wątków (ostatnie N dni).")
     ap.add_argument("--days", type=int, default=3, help="ile dni wstecz przeglądać (domyślnie 3: dziś/wczoraj/przedwczoraj)")
@@ -215,7 +211,7 @@ def main():
     candidates = []
 
     print(f"Zalogowano jako: u/{me}")
-    print(f"Szukam postów z ostatnich {args.days} dni… (flair Request, link w komentarzu, aktywny, nie-RAW/no-subs)")
+    print(f"Szukam postów z ostatnich {args.days} dni… (flair Request, link w komentarzu, aktywny, bez raw/no-subs/similar/different/trailer)")
 
     for s in sub.new(limit=args.limit):
         scanned += 1
@@ -243,10 +239,13 @@ def main():
                 continue
 
             body = c.body or ""
+
+            # dyskwalifikacje: no-subs/raw/trailer/similar/different/alt version itp.
             if comment_disqualifies(body):
                 continue
 
-            urls = [u for u in extract_urls(body)]
+            # dozwolone: wiele linków w komentarzu; bierzemy pierwszy działający z whitelisty
+            urls = extract_urls(body)
             for u in urls:
                 d = domain_of(u)
                 if d in DISALLOWED_DOMAINS:
@@ -304,4 +303,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

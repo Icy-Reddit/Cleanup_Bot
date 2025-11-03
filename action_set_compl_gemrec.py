@@ -36,7 +36,11 @@ ELIGIBLE_VIDEO_DOMAINS = {
     "facebook.com", "fb.watch",
 }
 
-DISALLOWED_DOMAINS = {"mydramalist.com"}
+DISALLOWED_DOMAINS = {
+    "mydramalist.com",
+    "douyin.com",
+    "v.douyin.com",
+}
 
 # --- REGEXY ---
 
@@ -304,4 +308,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

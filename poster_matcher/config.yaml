@@ -1,6 +1,6 @@
 reddit:
-  praw_site: "Cleanup_Bot"   # sekcja w praw.ini
-  subreddit: "CShortDramas"  # główny sub
+  praw_site: "Cleanup_Bot"
+  subreddit: "CShortDramas"
 
 paths:
   index_db: "poster_matcher/data/poster_index.sqlite"
@@ -14,6 +14,10 @@ indexing:
   max_image_bytes: 8000000
   timeout_sec: 12
   user_agent: "Cleanup_Bot PosterMatcher/1.0"
+
+download:
+  max_width: 1280      # preferowana szerokość z preview.resolutions
+  fallback_width: 720  # fallback gdy oryginał zbyt duży
 
 matching:
   lr_window_hours: 24

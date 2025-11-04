@@ -50,6 +50,12 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),   # where (can i) watch
     re.compile(r"\bwhere\s+to\s+watch\b", re.I),              # where to watch
     re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),    # where (can i) find
+
+    # --- nowe: "don't know the name/title" (również z apostrofem ’) ---
+    re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
+    re.compile(r"\b(i\s+)?do\s+not\s+know\s+(the\s+)?(title|name)\b", re.I),
+    re.compile(r"\bunknown\s+(title|name)\b", re.I),
+
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)

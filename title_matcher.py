@@ -233,7 +233,10 @@ _ALIAS_CALLED_REGEX = re.compile(
 
 def _extract_title_aliases(title: str) -> List[str]:
     """
-    Zwraca listę aliasów z tytułu – np. z cudzysłowu lub po 'called/titled/it's called'.
+    Zwraca listę aliasów z tytułu, aby uruchomić match także dla „czystych” wariantów:
+    - z cudzysłowu: "Love Beyond Fate"
+    - po słowie kluczowym: called/titled/it's called <ALIAS>
+    - po łącznikach:  A or B  /  A / B  /  A | B  /  A aka B
     """
     if not title:
         return []
@@ -241,25 +244,35 @@ def _extract_title_aliases(title: str) -> List[str]:
 
     aliases: List[str] = []
 
-    # 1) Cudzysłowy: "..." lub “ … ”
+    # 1) Cudzysłowy
     for m in _ALIAS_Q_REGEX.finditer(txt):
         aliases.append(m.group(1).strip())
 
-    # 2) Po słowach kluczowych: called|titled|it's called <ALIAS>
+    # 2) called / titled / it's called
     kw = _ALIAS_CALLED_REGEX.search(txt)
     if kw:
         raw = kw.group(1)
-        # zetnij na pierwszym separatorze / końcu zdania, usuń otaczające cudzysłowy
         raw = re.split(r"[.;:|/]\s*", raw)[0]
         raw = raw.strip().strip('“”"')
-        if len(raw) >= 3:
+        if 3 <= len(raw) <= 80:
             aliases.append(raw)
 
-    # Dedup case-insensitive
+    # 3) Łączniki: or / | aka
+    #    Przykład: "Use her as a cage or With her as a cage"
+    parts = re.split(r"\s*(?:/|\||\baka\b|\bor\b)\s*", txt, flags=re.I)
+    for p in parts:
+        p = p.strip().strip('“”"')
+        if 3 <= len(p) <= 80:
+            aliases.append(p)
+
+    # Dedup (case-insensitive) i bez kopiowania pełnego oryginału
     seen = set()
-    out = []
+    out: List[str] = []
+    orig_key = txt.lower()
     for a in aliases:
         k = a.lower()
+        if k == orig_key:
+            continue
         if k not in seen:
             seen.add(k)
             out.append(a)

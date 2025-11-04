@@ -45,6 +45,9 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
     re.compile(r"\bdoes\s+anyone\s+know\s+(its|the)\s+name\b", re.I),
     re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
+    
+    # Zaktualizowane wzorce dla „looking for”:
+    re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),  # Puste zapytania: looking for title/link
 
     # --- NOWE wzorce: „where … watch/find” ---
     re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),   # where (can i) watch

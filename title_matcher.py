@@ -195,6 +195,20 @@ def _strip_app_context(s: str) -> str:
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
 
+_SEG_SEP = re.compile(r"\s*(?:/|\||\baka\b|\bor\b)\s*", flags=re.I)
+
+def _segment_variants(s: str) -> list[str]:
+    """
+    Dzieli znormalizowany tytuł na segmenty aliasów (np. 'A / B' → ['a', 'b']),
+    przycina i składa spacje. Zwraca co najmniej 1 element (gdy brak separatorów).
+    """
+    if not s:
+        return []
+    parts = [p.strip() for p in _SEG_SEP.split(s) if p and p.strip()]
+    if not parts:
+        return [s.strip()]
+    return parts
+
 def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     """
     Returns (score, match_type). match_type in {"normalized_exact", "fuzzy"}.
@@ -202,12 +216,29 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     if q_norm and c_norm and q_norm == c_norm:
         return 100, "normalized_exact"
 
-    # NOWE: traktuj jako exact, jeśli po usunięciu kontekstu APP tytuły są równe
+    # exact po zdjęciu kontekstu aplikacji (Shortmax/Shortwave/Dramabox/Kalos)
     q_alt = _strip_app_context(q_norm)
     c_alt = _strip_app_context(c_norm)
     if q_alt and c_alt and q_alt == c_alt:
         return 100, "normalized_exact"
 
+    # NOWE: exact, jeśli jedna strona równa któremuś segmentowi drugiej (A / B, A | B, A or B, A aka B)
+    q_segs = _segment_variants(q_norm)
+    c_segs = _segment_variants(c_norm)
+    if q_segs and c_segs:
+        # q == któryś segment c
+        if any(q_norm == seg for seg in c_segs):
+            return 100, "normalized_exact"
+        # c == któryś segment q
+        if any(c_norm == seg for seg in q_segs):
+            return 100, "normalized_exact"
+        # po zdjęciu kontekstu APP
+        q_segs_alt = [_strip_app_context(seg) for seg in q_segs]
+        c_segs_alt = [_strip_app_context(seg) for seg in c_segs]
+        if any(q_alt == seg for seg in c_segs_alt if seg) or any(c_alt == seg for seg in q_segs_alt if seg):
+            return 100, "normalized_exact"
+
+    # w pozostałych wypadkach fuzzy
     return int(fuzz.token_set_ratio(q_norm, c_norm)), "fuzzy"
 
 def _certainty(score: int, auto_t: int, border_t: int) -> str:

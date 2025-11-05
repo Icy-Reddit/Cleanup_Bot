@@ -58,6 +58,14 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\b(i\s+)?do\s+not\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\bunknown\s+(title|name)\b", re.I),
+    
+    # "what title ...", "what is the title ..."
+    re.compile(r"\bwhat\s+title\b", re.I),
+    re.compile(r"\bwhat\s+is\s+the\s+title\b", re.I),
+
+    # "don't know the title/name" (na wszelki wypadek)
+    re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
+    re.compile(r"\bunknown\s+(title|name)\b", re.I),
 
 ]
 
@@ -124,7 +132,13 @@ def _titlecase_ratio(tokens: List[str]) -> float:
 
 def _has_suspect_word(tokens: List[str]) -> bool:
     tl = [t.lower() for t in tokens]
-    return any(t in SUSPECT_HINTS for t in tl)
+    if any(t in SUSPECT_HINTS for t in tl):
+        return True
+    # "please" z literówkami: llease, pleez, pls, plz, itp.
+    for t in tl:
+        if re.fullmatch(r"(?:p?l?e?a?se|pls|plz|pleez|llease)", t):
+            return True
+    return False
 
 def _looks_like_generic_request(s_norm: str) -> bool:
     return any(p.search(s_norm) for p in GENERIC_TITLE_PATTERNS)

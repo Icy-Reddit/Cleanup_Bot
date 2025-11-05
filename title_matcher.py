@@ -174,12 +174,40 @@ def _relation(author_a: Optional[str], author_b: Optional[str]) -> str:
         return "unknown"
     return "same_author" if author_a.casefold() == author_b.casefold() else "different_author"
 
+APP_NAMES = ("shortmax", "shortwave", "dramabox", "kalos")
+
+# zbuduj część regexu z listy powyżej
+_APP_ALT = r"(?:%s)" % "|".join(APP_NAMES)
+
+def _strip_app_context(s: str) -> str:
+    """
+    Usuwa kontekst typu 'on/in/via <APP>' oraz nawiasowe/końcowe wstawki z nazwą aplikacji.
+    Pracuje na już znormalizowanym tekście (lower/casefold + bez interpunkcji nadmiarowej).
+    """
+    if not s:
+        return s
+    # 'on/in/via/from/at APP'
+    s2 = re.sub(rf"\b(?:on|in|via|from|at)\s+{_APP_ALT}\b", " ", s, flags=re.I)
+    # nawiasy/końcówki: '(APP)', '- APP', ', APP', ': APP' itp. na końcu lub prawie końcu
+    s2 = re.sub(rrf"(?:[\(\[\-,:]\s*{_APP_ALT}\s*[\)\]])\s*$", " ", s2, flags=re.I)
+    s2 = re.sub(rrf"\s{_APP_ALT}\s*$", " ", s2, flags=re.I)
+    # porządkowanie spacji
+    s2 = re.sub(r"\s+", " ", s2).strip()
+    return s2
+
 def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     """
     Returns (score, match_type). match_type in {"normalized_exact", "fuzzy"}.
     """
     if q_norm and c_norm and q_norm == c_norm:
         return 100, "normalized_exact"
+
+    # NOWE: traktuj jako exact, jeśli po usunięciu kontekstu APP tytuły są równe
+    q_alt = _strip_app_context(q_norm)
+    c_alt = _strip_app_context(c_norm)
+    if q_alt and c_alt and q_alt == c_alt:
+        return 100, "normalized_exact"
+
     return int(fuzz.token_set_ratio(q_norm, c_norm)), "fuzzy"
 
 def _certainty(score: int, auto_t: int, border_t: int) -> str:

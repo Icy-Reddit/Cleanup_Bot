@@ -74,7 +74,7 @@ jobs:
             --commit \
             --inquiry-generic-only \
             --state-file "cache/state.json" \
-            -- mark-checked on \
+            --mark-checked on \
             --state-ttl-min 180 \
             --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \
           | tee titlematch_run.txt

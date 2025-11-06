@@ -25,7 +25,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install praw pyyaml requests pillow imagehash numpy
-
+      - name: Generate praw.ini from secrets
+        run: |
+          cat > praw.ini << 'EOF'
+          [${{ secrets.PRAW_SITE || 'Cleanup_Bot' }}]
+          client_id=${{ secrets.REDDIT_CLIENT_ID }}
+          client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
+          username=${{ secrets.REDDIT_USERNAME }}
+          password=${{ secrets.REDDIT_PASSWORD }}
+          user_agent=${{ secrets.REDDIT_USER_AGENT || 'PosterIndexer/1.0 by u/Cleanup_Bot' }}
+          EOF
       - name: Run indexer with retries
         env:
           # PRAW musi być skonfigurowane w repo (praw.ini via secrets/steps – jak w Titlematch)
@@ -41,4 +50,5 @@ jobs:
           git add data/shards/*.jsonl
           git diff --cached --quiet || git commit -m "Poster index shard(s): $(date -u +%F)"
           git push
+
 

@@ -1,57 +1,43 @@
-name: Poster Match Daily
+name: Poster Match - Daily
 
 on:
   schedule:
-    - cron: "20 6 * * *"  # codziennie 06:20 UTC (po indeksie)
+    - cron: "40 2 * * *"   # po indeksie (02:40 UTC)
   workflow_dispatch: {}
 
-jobs:
-  run-matcher:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install praw pyyaml requests pillow imagehash numpy rapidfuzz
 
-      - name: Restore poster index cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            poster_matcher/data
-            poster_matcher/cache
-          key: poster-index-v1-${{ runner.os }}-${{ date('YYYY-ww') }}
-
-      - name: Ensure praw.ini
+      - name: Build SQLite from shards
         run: |
-          mkdir -p ~/.config/praw
-          echo "[${{ secrets.PRAW_SITE || 'Cleanup_Bot' }}]
-client_id=${{ secrets.REDDIT_CLIENT_ID }}
-client_secret=${{ secrets.REDDIT_CLIENT_SECRET }}
-username=${{ secrets.REDDIT_USERNAME }}
-password=${{ secrets.REDDIT_PASSWORD }}
-user_agent=${{ secrets.USER_AGENT || 'Cleanup_Bot PosterMatcher/1.0' }}
-" > ~/.config/praw/praw.ini
+          python gh_build_sqlite.py
 
-      - name: Run matcher
+      - name: Run matcher (24h)
         run: |
-          DATE=$(date +'%Y-%m-%d')
-          python poster_matcher/poster_matcher.py \
-            --config poster_matcher/config.yaml \
-            --window 24h \
-            --report-csv poster_matcher/reports/poster_matches_${DATE}.csv \
-            --report-jsonl poster_matcher/reports/poster_matches_${DATE}.jsonl
+          mkdir -p reports
+          python poster_matcher.py --window 24h --config config.yaml \
+            --report-csv "reports/poster_matches_$(date -u +%F).csv" \
+            --report-jsonl "reports/poster_matches_$(date -u +%F).jsonl"
 
-      - name: Upload reports
+      - name: Upload reports (artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: poster-matches
-          path: poster_matcher/reports/
+          name: poster-matches-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn

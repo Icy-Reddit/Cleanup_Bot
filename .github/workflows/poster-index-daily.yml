@@ -32,7 +32,7 @@ jobs:
           # Alternatywnie: export REDDIT praw creds jako env i zbindować w praw.ini runtime (pomijam tu dla zwięzłości)
           PYTHONUNBUFFERED: "1"
         run: |
-          python gh_indexer.py --config config.yaml --retries 6 --sleep-sec 600
+          python poster_matcher/gh_indexer.py --config poster_matcher/config.yaml --retries 6 --sleep-sec 600
 
       - name: Commit new shard(s)
         run: |
@@ -41,3 +41,4 @@ jobs:
           git add data/shards/*.jsonl
           git diff --cached --quiet || git commit -m "Poster index shard(s): $(date -u +%F)"
           git push
+

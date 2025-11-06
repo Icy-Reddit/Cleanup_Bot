@@ -189,8 +189,8 @@ def _strip_app_context(s: str) -> str:
     # 'on/in/via/from/at APP'
     s2 = re.sub(rf"\b(?:on|in|via|from|at)\s+{_APP_ALT}\b", " ", s, flags=re.I)
     # nawiasy/końcówki: '(APP)', '- APP', ', APP', ': APP' itp. na końcu lub prawie końcu
-    s2 = re.sub(rrf"(?:[\(\[\-,:]\s*{_APP_ALT}\s*[\)\]])\s*$", " ", s2, flags=re.I)
-    s2 = re.sub(rrf"\s{_APP_ALT}\s*$", " ", s2, flags=re.I)
+    s2 = re.sub(rf"(?:[\(\[\-,:]\s*{_APP_ALT}\s*[\)\]])\s*$", " ", s2, flags=re.I)
+    s2 = re.sub(rf"\s{_APP_ALT}\s*$", " ", s2, flags=re.I)
     # porządkowanie spacji
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2

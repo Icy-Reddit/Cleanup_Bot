@@ -1,42 +1,44 @@
-# =========================
+# ========================= 
 # Poster Matcher – Config
 # =========================
 # Używany przez:
-#   poster_matcher/poster_indexer.py
-#   poster_matcher/poster_matcher.py
-# Obsługuje codzienny indeks obrazów (indexer)
-# i dopasowywanie postów z flairem Link Request (matcher).
+#   poster_matcher/poster_indexer.py      (lokalny indexer → SQLite)
+#   poster_matcher/poster_matcher.py      (lokalny matcher)
+#   poster_matcher/gh_indexer.py          (GitHub Actions → shardy JSONL)
+# GH indexer zapisuje do: data/shards/YYYY-MM-DD.jsonl
 
 reddit:
-  # nazwa sekcji w praw.ini (w .config/praw/praw.ini lub ~/.config/praw/praw.ini)
+  # nazwa sekcji w praw.ini (w runnerze generujemy z Secrets jako [Cleanup_Bot], lokalnie tak samo)
   praw_site: "Cleanup_Bot"
-  # subreddit, który przetwarzamy
+  # subreddit do przetwarzania
   subreddit: "CShortDramas"
 
 paths:
-  # baza danych z hashami obrazów (SQLite)
+  # baza hashy (SQLite) – używana tylko lokalnie
   index_db: "poster_matcher/data/poster_index.sqlite"
-  # plik z ostatnim przetworzonym timestampem
+  # stan lokalny (ostatni indexed_utc) – używany tylko lokalnie
   state_file: "poster_matcher/cache/state.json"
-  # katalog, gdzie trafiają raporty CSV/JSONL
+  # raporty lokalne (CSV/JSONL z matchera)
   reports_dir: "poster_matcher/reports"
+  # docelowe miejsce shardów w repo (informacyjnie; GH indexer i tak używa data/shards/)
+  shards_dir: "data/shards"
 
 # --------------------------------------
-# Ustawienia indeksowania (poster_indexer)
+# Ustawienia indeksowania (pobieranie obrazów & limity)
 # --------------------------------------
 indexing:
-  # ile dni wstecz trzymamy dane w indeksie (kandydaci do porównań)
+  # ile dni wstecz trzymamy dane do porównań (dla LOCAL matchera); GH indexer nie używa
   lookback_days: 90
 
   # minimalne wymiary obrazu, aby policzyć hash
   min_width: 320
   min_height: 320
 
-  # maksymalny rozmiar pliku (8 MB)
-  max_image_bytes: 8000000
+  # maksymalny rozmiar pliku (bajtów)
+  max_image_bytes: 8000000  # 8 MB
 
-  # maksymalny czas pobierania obrazu (sekundy)
-  timeout_sec: 12
+  # maksymalny czas pobierania obrazka (sek.)
+  timeout_sec: 15
 
   # identyfikacja w nagłówkach HTTP
   user_agent: "Cleanup_Bot PosterMatcher/1.0"
@@ -49,9 +51,25 @@ download:
   max_width: 1280
   # fallbackowa szerokość, jeśli powyższa jest zbyt duża lub brak preview
   fallback_width: 720
+  # BLOKADA hostów, z których nie pobieramy obrazów (linki do stron/video)
+  block_hosts:
+    - facebook.com
+    - www.facebook.com
+    - m.facebook.com
+    - l.facebook.com
+    - web.facebook.com
+    - youtube.com
+    - youtu.be
+    - tiktok.com
+    - www.tiktok.com
+    - instagram.com
+    - www.instagram.com
+    - x.com
+    - twitter.com
+    - mobile.twitter.com
 
 # --------------------------------------
-# Dopasowania (poster_matcher)
+# Dopasowania (używane przez lokalny poster_matcher.py)
 # --------------------------------------
 matching:
   # ile godzin wstecz skanować nowe posty LR
@@ -64,19 +82,14 @@ matching:
 
   # shortlist – szybkie filtrowanie kandydatów
   shortlist:
-    # maksymalna liczba kandydatów po shortlistingu
     max_candidates: 300
-    # maksymalny dystans phash16, aby kandydat trafił do shortlisty
     phash16_max_dist: 20
-    # minimalna korelacja HSV, aby kandydat trafił do shortlisty
     hsv_min_corr: 0.85
 
   # progi decyzyjne dla łącznego wyniku ensemble
   thresholds:
-    # pewne dopasowanie (CERTAIN)
-    certain: 0.85
-    # możliwe dopasowanie (UNSURE)
-    unsure: 0.72
+    certain: 0.85   # pewne dopasowanie
+    unsure: 0.72    # możliwe dopasowanie
 
   # ile najlepszych kandydatów zapisać w JSONL
   topk: 5
@@ -86,6 +99,6 @@ matching:
     phash16: 0.30
     phash8: 0.10
     dhash16: 0.15
-    whash: 0.15
-    center: 0.10
-    hsv: 0.20
+    whash:   0.15
+    center:  0.10
+    hsv:     0.20

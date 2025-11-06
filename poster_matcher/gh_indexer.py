@@ -1,41 +1,29 @@
-# gh_indexer.py
 import argparse, os, sys, json, time
 from datetime import datetime, timedelta, timezone
-import praw
-import yaml
-from poster_shared import best_image_url, fetch_image_bytes, open_image_rgb, compute_features, utc_date
+import praw, yaml
+from poster_shared import best_image_url, fetch_image_bytes, open_image_rgb, compute_features
 
 def load_config(path):
     with open(path,"r",encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-def target_day_utc(today_utc=None):
-    # indeksujemy "wczoraj" (UTC), żeby uniknąć problemów z postami na granicy dnia
-    now = today_utc or datetime.now(timezone.utc)
-    y = (now - timedelta(days=1)).date()
-    return y.strftime("%Y-%m-%d")
+def target_day_utc(now=None):
+    now = now or datetime.now(timezone.utc)
+    return (now - timedelta(days=1)).date().strftime("%Y-%m-%d")
 
-def ensure_dir(p):
-    os.makedirs(p, exist_ok=True)
-
-def iterate_recent(sub, limit):
-    # ostatnie N z .new()
-    for s in sub.new(limit=limit):
-        yield s
+def ensure_dir(p): os.makedirs(p, exist_ok=True)
 
 def run_once(cfg, day_str, delta_hours=36, limit=1000):
     reddit = praw.Reddit(site_name=cfg["reddit"]["praw_site"])
     sub = reddit.subreddit(cfg["reddit"]["subreddit"])
-    out_dir = os.path.join("data","shards")
-    ensure_dir(out_dir)
+    out_dir = os.path.join("data","shards"); ensure_dir(out_dir)
     out_path = os.path.join(out_dir, f"{day_str}.jsonl")
 
-    # okno czasu: [day 00:00, day 23:59:59] UTC + bufor wstecz (delta_hours)
-    day = datetime.fromisoformat(day_str).replace(tzinfo=timezone.utc)
-    start = day
-    end   = day + timedelta(days=1) - timedelta(seconds=1)
+    # okno dnia UTC (z buforem wstecz)
+    d0 = datetime.fromisoformat(day_str).replace(tzinfo=timezone.utc)
+    start = d0
+    end   = d0 + timedelta(days=1) - timedelta(seconds=1)
     back  = datetime.now(timezone.utc) - timedelta(hours=delta_hours)
-    # bierzemy posty z max(start, now-delta) .. end
     start_ts = int(max(start, back).timestamp())
     end_ts   = int(end.timestamp())
 
@@ -47,36 +35,26 @@ def run_once(cfg, day_str, delta_hours=36, limit=1000):
 
     seen = set()
     if os.path.exists(out_path):
-        # dogrywanie jest idempotentne — nie duplikujemy
         with open(out_path,"r",encoding="utf-8") as f:
             for line in f:
-                try:
-                    obj=json.loads(line)
-                    seen.add(obj["post_id"])
-                except Exception:
-                    continue
+                try: seen.add(json.loads(line)["post_id"])
+                except Exception: pass
 
     added=0
     with open(out_path,"a",encoding="utf-8") as out:
-        for s in iterate_recent(sub, limit=limit):
+        for s in sub.new(limit=limit):
             cu = int(getattr(s,"created_utc",0))
-            if cu<start_ts or cu>end_ts:
-                continue
-            if s.id in seen:
-                continue
-            # obraz
+            if cu<start_ts or cu>end_ts or s.id in seen: continue
+
             url = best_image_url(s, max_w, block_hosts=block)
-            if not url:
-                continue
+            if not url: continue
             try:
                 try:
                     raw = fetch_image_bytes(url, timeout=tmo, max_bytes=max_mb)
                 except ValueError as e:
                     if "image too large" in str(e):
-                        # fallback width
                         url2 = best_image_url(s, fb_w, block_hosts=block) or url
-                        raw = fetch_image_bytes(url2, timeout=tmo, max_bytes=max_mb)
-                        url = url2
+                        raw = fetch_image_bytes(url2, timeout=tmo, max_bytes=max_mb); url = url2
                     else:
                         continue
                 img = open_image_rgb(raw)
@@ -104,27 +82,24 @@ def run_once(cfg, day_str, delta_hours=36, limit=1000):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--day", help="YYYY-MM-DD (UTC). Domyślnie 'wczoraj'.")
-    ap.add_argument("--delta-hours", type=int, default=36, help="bufor wstecz dla braków")
-    ap.add_argument("--limit", type=int, default=1000, help="ile pobrać z .new()")
-    ap.add_argument("--retries", type=int, default=6, help="liczba prób przy awarii")
-    ap.add_argument("--sleep-sec", type=int, default=600, help="pauza między próbami")
+    ap.add_argument("--config", default="poster_matcher/config.yaml")
+    ap.add_argument("--day", help="YYYY-MM-DD (UTC). Default = yesterday")
+    ap.add_argument("--delta-hours", type=int, default=36)
+    ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--retries", type=int, default=12)   # ~2h odporności (12×10 min)
+    ap.add_argument("--sleep-sec", type=int, default=600)
     args=ap.parse_args()
 
     cfg=load_config(args.config)
     day=args.day or target_day_utc()
 
-    # retry/backoff – jeśli Reddit padnie, próbujemy co X minut
     for i in range(1, args.retries+1):
         try:
-            added = run_once(cfg, day, delta_hours=args.delta_hours, limit=args.limit)
-            # sukces nawet jeśli 0 (dzień może być realnie pusty)
+            run_once(cfg, day, delta_hours=args.delta_hours, limit=args.limit)
             sys.exit(0)
         except Exception as e:
             print(f"[WARN] attempt {i}/{args.retries} failed: {type(e).__name__}: {e}")
-            if i==args.retries:
-                sys.exit(1)
+            if i==args.retries: sys.exit(1)
             time.sleep(args.sleep_sec)
 
 if __name__=="__main__":

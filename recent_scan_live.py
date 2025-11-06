@@ -696,29 +696,52 @@ def main() -> int:
             except Exception as e:
                 print(f"[ACTION][WARN] Failed to execute action for {pid}: {e}", file=sys.stderr)
         # ---------------------------------------------
-# === Mark as "Checked" on Mod Queue (only for NO_ACTION) ===
-try:
-    if mark_checked_on and args.live and source == "modqueue" and decision.get("action") == "NO_ACTION":
-        # sprawdź, czy już nie ma raportu "Checked" (idempotencja)
-        existing_reasons = []
-        try:
-            # PRAW: submission.mod_reports -> lista [(moderator, reason), ...]
-            existing_reasons = [
-                (r[1] if isinstance(r, (list, tuple)) and len(r) > 1 else str(r) or "").strip().lower()
-                for r in getattr(post, "mod_reports", [])
-            ]
-        except Exception:
-            existing_reasons = []
 
-        if "checked" not in existing_reasons:
-            try:
-                # Moderator report = żółty znacznik na kafelku Mod Queue
-                post.mod.report("Checked")
-                print("[MARK] ModQueue: added moderator report 'Checked'")
-            except Exception as e:
-                print(f"[WARN] Could not add mod report 'Checked': {e}")
-except Exception as e:
-    print(f"[WARN] Mark-checked block failed: {e}")
+        # === Mark as "Checked" on Mod Queue (only for NO_ACTION) ===
+
+        try:
+
+            if mark_checked_on and args.live and source == "modqueue" and decision.get("action") == "NO_ACTION":
+
+                # sprawdź, czy już nie ma raportu "Checked" (idempotencja)
+
+                existing_reasons = []
+
+                try:
+
+                    # PRAW: post.mod_reports -> lista [(moderator, reason), ...]
+
+                    existing_reasons = [
+
+                        (r[1] if isinstance(r, (list, tuple)) and len(r) > 1 else str(r) or "").strip().lower()
+
+                        for r in getattr(post, "mod_reports", [])
+
+                    ]
+
+                except Exception:
+
+                    existing_reasons = []
+
+
+                if "checked" not in existing_reasons:
+
+                    try:
+
+                        # Moderator report = żółty znacznik na kafelku Mod Queue
+
+                        post.mod.report("Checked")
+
+                        print("[MARK] ModQueue: added moderator report 'Checked'")
+
+                    except Exception as e:
+
+                        print(f"[WARN] Could not add mod report 'Checked': {e}")
+
+        except Exception as e:
+
+            print(f"[WARN] Mark-checked block failed: {e}")
+
 
         # Logging (after actions too)
         if jsonl_path:

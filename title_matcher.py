@@ -1,15 +1,11 @@
 # title_matcher.py
 # r/CShortDramas — Title Matcher (text only)
 #
-# - Robust to call from recent_scan_live.py adapters:
-#   * match_title_for_post(post, config=None, **kwargs)
-#   * match_title(title_raw=..., author_name=..., subreddit=..., reddit=..., config=None, **kwargs)
 # - CJK-safe normalization + normalized-exact short-circuit
-# - Fuzzy on normalized strings (rapidfuzz token_set + token_sort, capped)
-# - Candidate pool from recent subreddit posts with flairs:
-#     📌 Link Request, 🔗 Found & Shared, ✅ Request Complete
-# - Thresholds read from config.yaml (fallbacks if missing)
-# - Returns a stable report: {"best": {...} or None, "top": [...], "pool_ids": [...]}
+# - Extra: exact także gdy tytuły są równe po usunięciu spacji (np. "stand in" == "standin")
+# - Fuzzy na bazie rapidfuzz (token_set + token_sort + ratio, z limitem 97)
+# - Delikatna kara dla konfliktujących słów (np. fiancée vs husband/wife)
+# - API: match_title_for_post(...) / match_title(...)
 
 from __future__ import annotations
 
@@ -21,7 +17,6 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from rapidfuzz import fuzz
 except Exception:  # pragma: no cover
-    # minimal fallback (very rarely used; strongly recommend rapidfuzz)
     def _ratio(a: str, b: str) -> int:
         if not a and not b:
             return 100
@@ -35,6 +30,7 @@ except Exception:  # pragma: no cover
     class fuzz:  # type: ignore
         token_set_ratio = staticmethod(_ratio)
         token_sort_ratio = staticmethod(_ratio)
+        ratio = staticmethod(_ratio)
 
 # ---------- Config helpers ----------
 
@@ -69,7 +65,6 @@ def _time_window_days(cfg: Optional[dict]) -> int:
     return int(_get(cfg, "decision.time_window_days", _DEFAULTS["decision"]["time_window_days"]))
 
 def _flairs(cfg: Optional[dict]) -> List[str]:
-    # Możesz dodać do config.yaml sekcję matcher.flairs jeśli chcesz
     fl = _get(cfg, "matcher.flairs", None)
     if isinstance(fl, list) and fl:
         return fl
@@ -100,7 +95,7 @@ def _fetch_recent_candidates(
     reddit: Any,
     subreddit_name: str,
     window_days: int,
-    limit_per_source: int = 2500,  # zgodnie z dotychczasowym ustawieniem
+    limit_per_source: int = 2500,
     flairs: Optional[List[str]] = None,
     exclude_post_id: Optional[str] = None,
     exclude_post_url: Optional[str] = None,
@@ -212,7 +207,6 @@ def _has_conflict(a: str, b: str) -> bool:
     btoks = set(b.split())
     for left, right in _CONFLICT_PAIRS:
         if (atoks & left) and (btoks & right):
-            # konflikt tylko gdy strony NIE współdzielą obu klas jednocześnie
             if not ((atoks & right) and (btoks & left)):
                 return True
         if (atoks & right) and (btoks & left):
@@ -224,16 +218,24 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     """
     Returns (score, match_type). match_type in {"normalized_exact", "fuzzy"}.
     """
+    # 1) exact na znormalizowanym tekście
     if q_norm and c_norm and q_norm == c_norm:
         return 100, "normalized_exact"
 
-    # exact po zdjęciu kontekstu aplikacji (Shortmax/Shortwave/Dramabox/Kalos)
+    # 1a) exact po zdjęciu kontekstu app (Shortmax/Shortwave/Dramabox/Kalos)
     q_alt = _strip_app_context(q_norm)
     c_alt = _strip_app_context(c_norm)
     if q_alt and c_alt and q_alt == c_alt:
         return 100, "normalized_exact"
 
-    # exact, jeśli jedna strona równa któremuś segmentowi drugiej (A / B, A | B, A or B, A aka B)
+    # 1b) exact po usunięciu spacji (np. "stand in" == "standin")
+    #     — działa też po wcześniejszym usunięciu interpunkcji w _normalize_title
+    if q_norm.replace(" ", "") == c_norm.replace(" ", ""):
+        return 100, "normalized_exact"
+    if q_alt.replace(" ", "") == c_alt.replace(" ", ""):
+        return 100, "normalized_exact"
+
+    # 1c) exact, jeśli jedna strona równa któremuś segmentowi drugiej (A / B | A or B | A aka B)
     q_segs = _segment_variants(q_norm)
     c_segs = _segment_variants(c_norm)
     if q_segs and c_segs:
@@ -245,11 +247,18 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
         c_segs_alt = [_strip_app_context(seg) for seg in c_segs]
         if any(q_alt == seg for seg in c_segs_alt if seg) or any(c_alt == seg for seg in q_segs_alt if seg):
             return 100, "normalized_exact"
+        # wariant bez spacji (gdy segmenty różnią się tylko spacjami)
+        if any(q_norm.replace(" ", "") == seg.replace(" ", "") for seg in c_segs):
+            return 100, "normalized_exact"
+        if any(c_norm.replace(" ", "") == seg.replace(" ", "") for seg in q_segs):
+            return 100, "normalized_exact"
 
-    # ——— Fuzzy: średnia z token_set oraz token_sort
-    s1 = int(fuzz.token_set_ratio(q_norm, c_norm))
-    s2 = int(getattr(fuzz, "token_sort_ratio", fuzz.token_set_ratio)(q_norm, c_norm))
-    score = int(round((s1 + s2) / 2))
+    # 2) Fuzzy: weź średnią z dwóch najlepszych wskaźników (set/sort/ratio)
+    s_set = int(fuzz.token_set_ratio(q_norm, c_norm))
+    s_sort = int(getattr(fuzz, "token_sort_ratio", fuzz.token_set_ratio)(q_norm, c_norm))
+    s_char = int(getattr(fuzz, "ratio", fuzz.token_set_ratio)(q_norm, c_norm))
+    trio = sorted([s_set, s_sort, s_char], reverse=True)
+    score = int(round((trio[0] + trio[1]) / 2))
 
     # delikatna kara dla konfliktujących słów (np. fiancée vs husband/wife)
     if _has_conflict(q_norm, c_norm):

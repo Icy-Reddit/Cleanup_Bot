@@ -2,9 +2,10 @@
 # r/CShortDramas — Title Matcher (text only)
 #
 # - CJK-safe normalization + normalized-exact short-circuit
-# - Extra: exact także gdy tytuły są równe po usunięciu spacji (np. "stand in" == "standin")
-# - Fuzzy na bazie rapidfuzz (token_set + token_sort + ratio, z limitem 97)
+# - Extra exact: równość także po usunięciu spacji (np. "stand in" == "standin")
+# - Fuzzy: średnia z token_set + token_sort + ratio, z limitem 97
 # - Delikatna kara dla konfliktujących słów (np. fiancée vs husband/wife)
+# - Rozszerzone aliasy: wyłuskanie pierwszego segmentu przed kropką lub " - "
 # - API: match_title_for_post(...) / match_title(...)
 
 from __future__ import annotations
@@ -153,7 +154,6 @@ def _fetch_recent_candidates(
             pass
     except Exception:
         # reddit/network error — zwracamy co zebraliśmy (być może puste)
-        return out
     return out
 
 # ---------- Scoring ----------
@@ -199,7 +199,7 @@ def _segment_variants(s: str) -> list[str]:
 # ——— Drobna heurystyka anty-pomyłkowa (konfliktujące słowa-klucze)
 _CONFLICT_PAIRS = [
     ({"fiancee", "fiancée", "fiance"}, {"husband", "wife"}),
-    # łatwo dodać kolejne pary, jeśli zajdzie potrzeba
+    # można dodać kolejne pary później
 ]
 
 def _has_conflict(a: str, b: str) -> bool:
@@ -229,7 +229,6 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
         return 100, "normalized_exact"
 
     # 1b) exact po usunięciu spacji (np. "stand in" == "standin")
-    #     — działa też po wcześniejszym usunięciu interpunkcji w _normalize_title
     if q_norm.replace(" ", "") == c_norm.replace(" ", ""):
         return 100, "normalized_exact"
     if q_alt.replace(" ", "") == c_alt.replace(" ", ""):
@@ -253,7 +252,7 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
         if any(c_norm.replace(" ", "") == seg.replace(" ", "") for seg in q_segs):
             return 100, "normalized_exact"
 
-    # 2) Fuzzy: weź średnią z dwóch najlepszych wskaźników (set/sort/ratio)
+    # 2) Fuzzy: średnia z dwóch najlepszych (set/sort/ratio)
     s_set = int(fuzz.token_set_ratio(q_norm, c_norm))
     s_sort = int(getattr(fuzz, "token_sort_ratio", fuzz.token_set_ratio)(q_norm, c_norm))
     s_char = int(getattr(fuzz, "ratio", fuzz.token_set_ratio)(q_norm, c_norm))
@@ -264,7 +263,7 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     if _has_conflict(q_norm, c_norm):
         score = max(0, score - 5)
 
-    # twardy limit: fuzzy nigdy nie daje 100 (maks 97), żeby nie podszywać się pod exact
+    # fuzzy nigdy nie daje 100 — zarezerwowane dla normalized_exact
     score = min(score, 97)
 
     return score, "fuzzy"
@@ -318,12 +317,16 @@ _ALIAS_CALLED_REGEX = re.compile(
     flags=re.I,
 )
 
+# nowy splitter: tniemy po pierwszej kropce lub " - "
+_SPLIT_PREFIX = re.compile(r"\s*(?:[.]\s+| \-\s+)", flags=re.UNICODE)
+
 def _extract_title_aliases(title: str) -> List[str]:
     """
-    Zwraca listę aliasów z tytułu, aby uruchomić match także dla „czystych” wariantów:
-    - z cudzysłowu: "Love Beyond Fate"
-    - po słowie kluczowym: called/titled/it's called <ALIAS>
-    - po łącznikach:  A or B  /  A / B  /  A | B  /  A aka B
+    Zwraca listę aliasów z tytułu:
+    - "Love Beyond Fate" ujete w cudzysłowach
+    - po słowach: called / titled / it's called
+    - warianty po łącznikach: A or B / A / B / A | B / A aka B
+    - NOWE: pierwszy segment przed kropką lub ' - ' (np. "Reborn without mercy. FLs name..." → "Reborn without mercy")
     """
     if not title:
         return []
@@ -350,6 +353,15 @@ def _extract_title_aliases(title: str) -> List[str]:
         p = p.strip().strip('“”"')
         if 3 <= len(p) <= 80:
             aliases.append(p)
+
+    # 4) NOWE: prefix przed pierwszą kropką lub " - "
+    #    bardzo ostrożnie: bierz tylko, jeśli to sensowna fraza tytułowa (2-8 słów, min 8 znaków)
+    cut = _SPLIT_PREFIX.split(txt, maxsplit=1)
+    if cut:
+        prefix = cut[0].strip().strip('“”"')
+        word_count = len(prefix.split())
+        if 2 <= word_count <= 8 and 8 <= len(prefix) <= 80:
+            aliases.append(prefix)
 
     # Dedup (case-insensitive) i bez kopiowania pełnego oryginału
     seen = set()
@@ -419,7 +431,7 @@ def match_title(
     window_days = _time_window_days(config)
     flairs = _flairs(config)
 
-    # Warianty: pełny tytuł + aliasy z cudzysłowu/po 'called/titled'
+    # Warianty: pełny tytuł + aliasy z cudzysłowu/po 'called/titled' + prefix przed kropką/" - "
     title_variants: List[str] = [title_raw]
     for alias in _extract_title_aliases(title_raw):
         if alias.lower() not in [t.lower() for t in title_variants]:

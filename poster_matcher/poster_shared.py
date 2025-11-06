@@ -1,5 +1,4 @@
-# poster_shared.py
-import io, json, time, os
+import io, json, os
 from html import unescape
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -51,7 +50,6 @@ def _pick_res_preview(preview, wanted_width:int):
 
 def best_image_url(subm, max_width:int, block_hosts=None):
     url = None
-    # gallery
     if getattr(subm,"is_gallery",False) and getattr(subm,"media_metadata",None):
         try:
             first = next(iter(subm.media_metadata.values()))
@@ -59,7 +57,6 @@ def best_image_url(subm, max_width:int, block_hosts=None):
                 url = first["s"]["u"]
         except Exception:
             pass
-    # preview
     if url is None:
         try:
             if subm.preview:
@@ -72,12 +69,10 @@ def best_image_url(subm, max_width:int, block_hosts=None):
                         url = imgs[0]["source"]["url"]
         except Exception:
             pass
-    # direct
     if url is None and getattr(subm,"url_overridden_by_dest",None):
         cand = subm.url_overridden_by_dest
         if not _is_blocked_host(cand, block_hosts):
             url = cand
-    # v.redd.it thumb
     if url is None:
         try:
             if subm.media and "reddit_video" in subm.media:
@@ -85,14 +80,11 @@ def best_image_url(subm, max_width:int, block_hosts=None):
                     url = subm.preview["images"][0]["source"]["url"]
         except Exception:
             pass
-    # thumbnail
     if url is None and getattr(subm,"thumbnail",None) and str(subm.thumbnail).startswith("http"):
         if not _is_blocked_host(subm.thumbnail, block_hosts):
             url = subm.thumbnail
-
     if url:
         url = unescape(url).replace("&amp;","&")
-
     if url and _is_blocked_host(url, block_hosts):
         return None
     return url
@@ -118,7 +110,6 @@ def fetch_image_bytes(url, timeout, max_bytes, ua="PosterIndexer/1.0"):
 def open_image_rgb(raw:bytes):
     if not raw: raise ValueError("empty_bytes")
     img = Image.open(io.BytesIO(raw))
-    # Normalizacja bez ostrzeżeń Pillow
     if img.mode=="P":
         img = img.convert("RGBA" if "transparency" in img.info else "RGB")
     elif img.mode in ("LA","RGBA"):
@@ -132,32 +123,23 @@ def open_image_rgb(raw:bytes):
     return img
 
 def compute_features(img):
-    # ogranicz rozmiar
     if max(img.size)>1024:
-        img = img.copy()
-        img.thumbnail((1024,1024), Image.LANCZOS)
-
+        img = img.copy(); img.thumbnail((1024,1024), Image.LANCZOS)
     ph16 = imagehash.phash(img, hash_size=16)
     ph8  = imagehash.phash(img, hash_size=8)
     dh16 = imagehash.dhash(img, hash_size=16)
     wh   = imagehash.whash(img, hash_size=16, image_scale=None, mode='haar')
-
     w,h = img.size
     cw,ch = int(w*0.8), int(h*0.8)
     cx,cy = (w-cw)//2,(h-ch)//2
     ctr = img.crop((cx,cy,cx+cw,cy+ch))
     ctr_ph16 = imagehash.phash(ctr, hash_size=16)
-
-    # prosty HSV hist
     arr = np.array(img.convert("HSV"), dtype=np.uint8)
     H,S,V = arr[...,0],arr[...,1],arr[...,2]
     hist,_ = np.histogramdd((H.ravel(),S.ravel(),V.ravel()),
                              bins=(16,4,4), range=((0,256),(0,256),(0,256)))
-    hist = hist.astype(np.float32)
-    hist /= (hist.sum()+1e-9)
-    norm = np.linalg.norm(hist)
-    if norm>0: hist = hist/norm
-
+    hist = hist.astype(np.float32); hist /= (hist.sum()+1e-9)
+    norm = np.linalg.norm(hist);  hist = hist/norm if norm>0 else hist
     return {
         "phash16": str(ph16),
         "phash8":  str(ph8),

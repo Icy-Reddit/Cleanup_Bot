@@ -416,7 +416,9 @@ def main() -> int:
     ap.add_argument("--state-ttl-min", type=int, default=180)
     ap.add_argument("--subreddit", default="CShortDramas")
     ap.add_argument("--verbose", action="store_true")
+    parser.add_argument("--mark-checked", choices=["on", "off"], default="off", help="Add a moderator report 'Checked' for posts scanned from modqueue when decision is NO_ACTION")
     args = ap.parse_args()
+    mark_checked_on = (args.mark_checked == "on")
 
     try:
         cfg = load_config(args.config)

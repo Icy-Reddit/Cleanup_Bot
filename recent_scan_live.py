@@ -379,7 +379,7 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
 REASON_TITLE_MAP = {
     "REPEATED": "Repeated Request",             # (opcjonalnie: "Unsolved Request")
     "DUPLICATE": "Duplicate Post",
-    "MISSING": "Lack of title or description",
+    "MISSING": "Lack of Drama Name or Description in Title",
 }
 
 @lru_cache(maxsize=64)

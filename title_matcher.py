@@ -5,7 +5,7 @@
 #   * match_title_for_post(post, config=None, **kwargs)
 #   * match_title(title_raw=..., author_name=..., subreddit=..., reddit=..., config=None, **kwargs)
 # - CJK-safe normalization + normalized-exact short-circuit
-# - Fuzzy on normalized strings (rapidfuzz.token_set_ratio)
+# - Fuzzy on normalized strings (rapidfuzz token_set + token_sort, capped)
 # - Candidate pool from recent subreddit posts with flairs:
 #     📌 Link Request, 🔗 Found & Shared, ✅ Request Complete
 # - Thresholds read from config.yaml (fallbacks if missing)
@@ -23,18 +23,18 @@ try:
 except Exception:  # pragma: no cover
     # minimal fallback (very rarely used; strongly recommend rapidfuzz)
     def _ratio(a: str, b: str) -> int:
-        # simple normalized Levenshtein-ish ratio placeholder
         if not a and not b:
             return 100
         if not a or not b:
             return 0
-        # naive token-set overlap
         sa, sb = set(a.split()), set(b.split())
         if not sa or not sb:
             return 0
         return int(100 * len(sa & sb) / max(1, len(sa | sb)))
-    class fuzz:
+
+    class fuzz:  # type: ignore
         token_set_ratio = staticmethod(_ratio)
+        token_sort_ratio = staticmethod(_ratio)
 
 # ---------- Config helpers ----------
 
@@ -100,14 +100,14 @@ def _fetch_recent_candidates(
     reddit: Any,
     subreddit_name: str,
     window_days: int,
-    limit_per_source: int = 2500,  # podniesione wg Twojej decyzji
+    limit_per_source: int = 2500,  # zgodnie z dotychczasowym ustawieniem
     flairs: Optional[List[str]] = None,
     exclude_post_id: Optional[str] = None,
     exclude_post_url: Optional[str] = None,
 ) -> List[Any]:
     """
     Build a recent candidate pool from subreddit, filtered by time window and flair.
-    Uses /new() + mod queque  — najprostsze i wystarczające (modqueue pobierasz gdzie indziej).
+    Uses /new() and modqueue (dedupe by id).
     """
     flairs = flairs or _flairs(None)
     out: List[Any] = []
@@ -115,18 +115,15 @@ def _fetch_recent_candidates(
         sub = reddit.subreddit(subreddit_name)
         now = _utc_now()
         min_ts = now - window_days * 86400
-        
-        # źródło 1
+
+        # źródło 1 — /new
         for s in sub.new(limit=limit_per_source):
             try:
-                # time filter
                 if getattr(s, "created_utc", 0.0) < min_ts:
                     continue
-                # flair filter (string match on link_flair_text)
                 lf = getattr(s, "link_flair_text", None) or ""
                 if lf not in flairs:
                     continue
-                # exclude current post
                 if exclude_post_id and getattr(s, "id", None) == exclude_post_id:
                     continue
                 if exclude_post_url and getattr(s, "permalink", None) == exclude_post_url:
@@ -134,20 +131,17 @@ def _fetch_recent_candidates(
                 out.append(s)
             except Exception:
                 continue
-        
-        # --- źródło 2: Mod Queue (dodatkowe kandydaty) ---
+
+        # źródło 2 — modqueue (uzupełnienie)
         seen_ids = {getattr(s, "id", None) for s in out}
         try:
             for s in sub.mod.modqueue(limit=limit_per_source):
                 try:
-                    # time filter
                     if getattr(s, "created_utc", 0.0) < min_ts:
                         continue
-                    # flair filter (string match on link_flair_text)
                     lf = getattr(s, "link_flair_text", None) or ""
                     if lf not in flairs:
                         continue
-                    # exclude current post
                     if exclude_post_id and getattr(s, "id", None) == exclude_post_id:
                         continue
                     if exclude_post_url and getattr(s, "permalink", None) == exclude_post_url:
@@ -163,7 +157,7 @@ def _fetch_recent_candidates(
         except Exception:
             pass
     except Exception:
-        # reddit or network error — return whatever we have (likely empty)
+        # reddit/network error — zwracamy co zebraliśmy (być może puste)
         return out
     return out
 
@@ -175,8 +169,6 @@ def _relation(author_a: Optional[str], author_b: Optional[str]) -> str:
     return "same_author" if author_a.casefold() == author_b.casefold() else "different_author"
 
 APP_NAMES = ("shortmax", "shortwave", "dramabox", "kalos")
-
-# zbuduj część regexu z listy powyżej
 _APP_ALT = r"(?:%s)" % "|".join(APP_NAMES)
 
 def _strip_app_context(s: str) -> str:
@@ -209,6 +201,25 @@ def _segment_variants(s: str) -> list[str]:
         return [s.strip()]
     return parts
 
+# ——— Drobna heurystyka anty-pomyłkowa (konfliktujące słowa-klucze)
+_CONFLICT_PAIRS = [
+    ({"fiancee", "fiancée", "fiance"}, {"husband", "wife"}),
+    # łatwo dodać kolejne pary, jeśli zajdzie potrzeba
+]
+
+def _has_conflict(a: str, b: str) -> bool:
+    atoks = set(a.split())
+    btoks = set(b.split())
+    for left, right in _CONFLICT_PAIRS:
+        if (atoks & left) and (btoks & right):
+            # konflikt tylko gdy strony NIE współdzielą obu klas jednocześnie
+            if not ((atoks & right) and (btoks & left)):
+                return True
+        if (atoks & right) and (btoks & left):
+            if not ((atoks & left) and (btoks & right)):
+                return True
+    return False
+
 def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     """
     Returns (score, match_type). match_type in {"normalized_exact", "fuzzy"}.
@@ -222,24 +233,32 @@ def _score_pair(q_norm: str, c_norm: str) -> Tuple[int, str]:
     if q_alt and c_alt and q_alt == c_alt:
         return 100, "normalized_exact"
 
-    # NOWE: exact, jeśli jedna strona równa któremuś segmentowi drugiej (A / B, A | B, A or B, A aka B)
+    # exact, jeśli jedna strona równa któremuś segmentowi drugiej (A / B, A | B, A or B, A aka B)
     q_segs = _segment_variants(q_norm)
     c_segs = _segment_variants(c_norm)
     if q_segs and c_segs:
-        # q == któryś segment c
         if any(q_norm == seg for seg in c_segs):
             return 100, "normalized_exact"
-        # c == któryś segment q
         if any(c_norm == seg for seg in q_segs):
             return 100, "normalized_exact"
-        # po zdjęciu kontekstu APP
         q_segs_alt = [_strip_app_context(seg) for seg in q_segs]
         c_segs_alt = [_strip_app_context(seg) for seg in c_segs]
         if any(q_alt == seg for seg in c_segs_alt if seg) or any(c_alt == seg for seg in q_segs_alt if seg):
             return 100, "normalized_exact"
 
-    # w pozostałych wypadkach fuzzy
-    return int(fuzz.token_set_ratio(q_norm, c_norm)), "fuzzy"
+    # ——— Fuzzy: średnia z token_set oraz token_sort
+    s1 = int(fuzz.token_set_ratio(q_norm, c_norm))
+    s2 = int(getattr(fuzz, "token_sort_ratio", fuzz.token_set_ratio)(q_norm, c_norm))
+    score = int(round((s1 + s2) / 2))
+
+    # delikatna kara dla konfliktujących słów (np. fiancée vs husband/wife)
+    if _has_conflict(q_norm, c_norm):
+        score = max(0, score - 5)
+
+    # twardy limit: fuzzy nigdy nie daje 100 (maks 97), żeby nie podszywać się pod exact
+    score = min(score, 97)
+
+    return score, "fuzzy"
 
 def _certainty(score: int, auto_t: int, border_t: int) -> str:
     if score >= auto_t:
@@ -317,7 +336,6 @@ def _extract_title_aliases(title: str) -> List[str]:
             aliases.append(raw)
 
     # 3) Łączniki: or / | aka
-    #    Przykład: "Use her as a cage or With her as a cage"
     parts = re.split(r"\s*(?:/|\||\baka\b|\bor\b)\s*", txt, flags=re.I)
     for p in parts:
         p = p.strip().strip('“”"')
@@ -392,25 +410,23 @@ def match_title(
     window_days = _time_window_days(config)
     flairs = _flairs(config)
 
-    # Zbuduj warianty: pełny tytuł + aliasy z cudzysłowu/po 'called/titled'
-    title_variants: List[str] = []
-    title_variants.append(title_raw)
+    # Warianty: pełny tytuł + aliasy z cudzysłowu/po 'called/titled'
+    title_variants: List[str] = [title_raw]
     for alias in _extract_title_aliases(title_raw):
         if alias.lower() not in [t.lower() for t in title_variants]:
             title_variants.append(alias)
 
-    # Build pool (recent candidates)
+    # Pool
     pool = _fetch_recent_candidates(
         reddit=reddit,
         subreddit_name=subreddit,
         window_days=window_days,
-        limit_per_source=2500,  # zgodnie z Twoim ustawieniem
+        limit_per_source=2500,
         flairs=flairs,
         exclude_post_id=exclude_post_id,
         exclude_post_url=exclude_post_url,
     )
 
-    # Spróbuj dla każdego wariantu i wybierz najlepszy
     global_top_entries: List[Dict[str, Any]] = []
     pool_ids: List[str] = []
     best_entry: Optional[Dict[str, Any]] = None
@@ -440,7 +456,7 @@ def match_title(
         local_top: List[Dict[str, Any]] = []
         for i, (score, rel, cand, mtype) in enumerate(scored):
             certainty = _certainty(score, auto_t, border_t)
-            # Bezpiecznik: 'certain' tylko dla normalized_exact (pełna równość po normalizacji)
+            # Bezpiecznik: 'certain' tylko dla normalized_exact
             if mtype != "normalized_exact" and certainty == "certain":
                 certainty = "borderline"
 
@@ -454,10 +470,8 @@ def match_title(
             if pid:
                 pool_ids.append(pid)
 
-        # dołącz lokalny top (zachowujemy do 3 z każdego wariantu, aby log był informacyjny)
         global_top_entries.extend(local_top)
 
-    # Przytnij globalny top do 3 najlepszych po score (dla czytelności)
     if global_top_entries:
         global_top_entries.sort(key=lambda e: e["score"], reverse=True)
         global_top_entries = global_top_entries[:3]

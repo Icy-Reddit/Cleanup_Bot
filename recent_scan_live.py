@@ -416,8 +416,7 @@ def main() -> int:
 
             # 🔍 Inquiry — tylko walidacja (opcjonalnie generic-only)
             elif flair == "🔍 Inquiry":
-                if args.inquiry_g
-eneric_only:
+                if args.inquiry_generic_only:
                     if vstatus == "MISSING":
                         decision = {
                             "action": "AUTO_REMOVE",

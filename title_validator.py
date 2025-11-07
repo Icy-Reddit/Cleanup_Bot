@@ -224,6 +224,38 @@ def _extract_trailing_candidate(title_raw: str) -> str | None:
         return tail.strip()
     return None
 
+# Kandydat po prefiksie generic (np. "Looking for <Title>")
+_GENERIC_PREFIX = re.compile(
+    r"^\s*(?:looking\s+for|help\s+me\s+find|please\s+help\s+me\s+find|any(?:one|body)\s+know(?:s)?\s+(?:the\s+)?name\s+of)\s+(?P<cand>.+?)\s*$",
+    re.I,
+)
+
+def _extract_candidate_after_generic_prefix(title_raw: str) -> str | None:
+    """
+    Szuka kandydata tytułu bez separatora, zaraz po frazie typu:
+      'Looking for <tytuł>' / 'Help me find <tytuł>' / 'Anyone know the name of <tytuł>'
+    Kryteria ostrożne: 2–10 tokenów, >=1 token długości ≥4, nie same stopwordy.
+    """
+    if not title_raw:
+        return None
+    m = _GENERIC_PREFIX.match(title_raw.strip())
+    if not m:
+        return None
+    cand = (m.group("cand") or "").strip().strip('“”"')
+    if not cand:
+        return None
+
+    # proste sito jakości
+    norm = _normalize_text(cand)
+    toks = _tokens(norm)
+    if not (2 <= len(toks) <= 10):
+        return None
+    if all(_ltoken(t) in GENERIC_STOPWORDS for t in toks):
+        return None
+    if not (any(len(t) >= 4 for t in toks) or any(_token_is_hyphen_title(t) for t in toks)):
+        return None
+
+    return cand
 # ----------------------------- Walidator główny -----------------------------
 
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
@@ -244,6 +276,12 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
                 # „generic prefix + potencjalny tytuł” → nie karzemy jako MISSING.
                 # Zostawiamy do weryfikacji — matcher może jeszcze złapać REPEATED.
                 return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
+                
+            # NOWE: kandydat bez separatora po prefiksie generic (np. "Looking for The fierce bride’s second chance")
+            prefixed = _extract_candidate_after_generic_prefix(title_raw)
+            if prefixed:
+                return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
+                
             return {"status": "MISSING", "reason": "generic_placeholder"}
 
     # Puste pozycje łapiemy zawsze

@@ -202,6 +202,31 @@ def _extract_trailing_candidate(title_raw: str) -> str | None:
         return tail.strip()
     return None
 
+# nowa funkcja pomocnicza (tuż obok _extract_trailing_candidate)
+_INLINE_TITLE = re.compile(
+    r"\b(?:it\s+says|it\s+is\s+called|called|titled|aka|aka\s+as|name(?:d)?\s+is)\s+([A-Z][\w'-]+(?:\s+[A-Z][\w'-]+){1,6})",
+    re.I
+)
+
+def _extract_inline_candidate(title_raw: str) -> str | None:
+    """
+    Szuka tytułu wbudowanego w zdaniu bez separatora, np.:
+      - "It says Love Beyond Fate but I cannot find it"
+      - "Named is Hidden Marriage"
+      - "It is called The Stand-In"
+    Zwraca fragment 'Title Case' 2-7 słów, jeśli wygląda na nazwę.
+    """
+    if not title_raw:
+        return None
+    m = _INLINE_TITLE.search(title_raw.strip())
+    if m:
+        cand = m.group(1).strip().strip('“”"')
+        # bardzo zachowawcze sito: 2–7 słów, min. jeden token ≥4 znaki
+        toks = cand.split()
+        if 2 <= len(toks) <= 7 and any(len(t) >= 4 for t in toks):
+            return cand
+    return None    
+
 # ----------------------------- Walidator -----------------------------
 
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:

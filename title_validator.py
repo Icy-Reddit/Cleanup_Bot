@@ -256,6 +256,30 @@ def _extract_candidate_after_generic_prefix(title_raw: str) -> str | None:
         return None
 
     return cand
+    
+# Krótki hint w cudzysłowie (np. "Ke Chun") — traktuj jako wskazówkę, nie pełny tytuł
+_QUOTE_CONTENT = re.compile(r'[\"“]([^\"“]{2,80})[\"”]')
+
+def _extract_soft_quoted_hint(title_raw: str) -> str | None:
+    """
+    Szuka krótkiego fragmentu w cudzysłowie (1–3 słowa), np. nazwy aktora.
+    Jeśli znajdzie — zwraca hint; używane tylko, by złagodzić MISSING -> AMBIGUOUS.
+    """
+    if not title_raw:
+        return None
+    m = _QUOTE_CONTENT.search(title_raw)
+    if not m:
+        return None
+    cand = m.group(1).strip()
+    # sito jakości: 1–3 tokeny, bez samych stopwordów
+    norm = _normalize_text(cand)
+    toks = _tokens(norm)
+    if not (1 <= len(toks) <= 3):
+        return None
+    if all(_ltoken(t) in GENERIC_STOPWORDS for t in toks):
+        return None
+    return cand
+    
 # ----------------------------- Walidator główny -----------------------------
 
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
@@ -281,6 +305,14 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
             prefixed = _extract_candidate_after_generic_prefix(title_raw)
             if prefixed:
                 return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
+                
+            # NOWE: króciutki hint w cudzysłowie (np. "Ke Chun") → nie usuwaj, daj do modqueue
+            soft_quoted = _extract_soft_quoted_hint(title_raw)
+            if soft_quoted:
+                return {"status": "AMBIGUOUS", "reason": "quoted_hint"}
+
+        return {"status": "MISSING", "reason": "generic_placeholder"}
+    
                 
             return {"status": "MISSING", "reason": "generic_placeholder"}
 

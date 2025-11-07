@@ -31,6 +31,7 @@ import os
 import sys
 import inspect
 import warnings
+import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import asdict, is_dataclass
@@ -394,33 +395,20 @@ def get_reason_id(subreddit_name: str, reddit, reason_title: str) -> Optional[st
         return None
     return None
 
-def _already_marked_checked(post, marker_substr: str) -> bool:
-    """
-    Sprawdź, czy post ma już raport zawierający marker_substr (np. 'Titlematch: checked').
-    Działa zarówno dla mod_reports (lista str), jak i user_reports (lista (reason, count)).
-    Z założenia 'best effort' - jeśli atrybutów brak, traktujemy jak nieoznaczony.
-    """
-    try:
-        # mod_reports: list[str]
-        mreports = getattr(post, "mod_reports", None) or []
-        for r in mreports:
-            try:
-                if r and marker_substr.lower() in str(r).lower():
-                    return True
-            except Exception:
-                continue
+def _already_marked_checked(post, marker_text: str) -> bool:
+    pattern = re.compile(r"\bchecked\b", re.IGNORECASE)
 
-        # user_reports: list[tuple[str,int]]
-        ureports = getattr(post, "user_reports", None) or []
-        for tup in ureports:
-            try:
-                reason = tup[0] if isinstance(tup, (list, tuple)) and tup else None
-                if reason and marker_substr.lower() in str(reason).lower():
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+    # mod reports (lista stringów)
+    for r in getattr(post, "mod_reports", None) or []:
+        if r and pattern.search(str(r)):
+            return True
+
+    # user reports (lista (reason, count))
+    for tup in getattr(post, "user_reports", None) or []:
+        reason = tup[0] if isinstance(tup, (list, tuple)) and tup else None
+        if reason and pattern.search(str(reason)):
+            return True
+
     return False
 
 # ------------------------ Main ------------------------
@@ -445,8 +433,8 @@ def main() -> int:
     ap.add_argument("--subreddit", default="CShortDramas")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--mark-checked", action="store_true",
-                    help="Po NO_ACTION oznacz w modqueue: 'Titlematch: checked ✓' (tylko 📌 Link Request).")
-    ap.add_argument("--mark-checked-text", default="Titlematch: checked ✓",
+                    help="Po NO_ACTION oznacz w modqueue: 'checked ' (tylko 📌 Link Request).")
+    ap.add_argument("--mark-checked-text", default="checked",
                     help="Treść raportu widoczna dla modów w modqueue (żółta etykieta).")
     ap.add_argument("--mark-checked-max", type=int, default=30,
                     help="Limit oznaczeń 'checked' na jedno uruchomienie, by unikać floodu.")
@@ -739,7 +727,7 @@ def main() -> int:
                             if args._mark_checked_count < (args.mark_checked_max or 0):
                                 marker_text = args.mark_checked_text or "Titlematch: checked ✓"
                                 if not _already_marked_checked(post, marker_text.split("✓")[0].strip()):
-                                    post.report(marker_text)
+                                    post.mod.report(marker_text)
                                     args._mark_checked_count += 1
                                     print(f"[ACTION] Marked as checked ({args._mark_checked_count}/{args.mark_checked_max}): {marker_text}")
                                 else:

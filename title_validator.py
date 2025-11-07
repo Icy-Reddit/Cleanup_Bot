@@ -44,6 +44,8 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
 
     re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),
+    re.compile(r"\blooking\s+for\s+this\s+drama\b", re.I),
+    re.compile(r"\bplease\s+help\b", re.I),
 
     re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),
     re.compile(r"\bwhere\s+to\s+watch\b", re.I),

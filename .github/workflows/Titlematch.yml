@@ -73,6 +73,7 @@ jobs:
             --live \
             --commit \
             --inquiry-generic-only \
+            --mark-checked-text "checked ✓" \
             --state-file "cache/state.json" \
             --state-ttl-min 180 \
             --log-jsonl "logs/decisions_$(date -u +%F).jsonl" \

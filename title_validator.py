@@ -164,7 +164,7 @@ def _looks_like_generic_placeholder(title: str) -> bool:
     # wcześniejsza reguła: cytat z tytułem → nie generic
     if re.search(r"[\"“][^\"“]{3,}?[\"”]", t_raw):
         return False
-    # NOWOŚĆ: najpierw sprawdź wyraźne wzorce generic
+    # najpierw sprawdź wyraźne wzorce generic
     if _looks_like_generic_request(t_norm):
         return True
     # dopiero potem "strong signals"
@@ -234,6 +234,11 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     title_raw = (title or "").strip()
 
     if flair == "📌 Link Request":
+        # [NOWE] najpierw sprawdź, czy w zdaniu jest „inline title” (np. "It says Love Beyond Fate")
+        inline = _extract_inline_candidate(title_raw)
+        if inline:
+            return {"status": "AMBIGUOUS", "reason": "inline_candidate"}
+
         if _looks_like_generic_placeholder(title_raw):
             trailing = _extract_trailing_candidate(title_raw)
             if trailing:
@@ -251,7 +256,7 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     informative = _informative_tokens(toks)
 
     if flair in STRICT_FLAIRS:
-        # NOWOŚĆ: wzorzec generic ma priorytet (nie warunkujemy już strong_signal)
+        # wzorzec generic ma priorytet (nie warunkujemy już strong_signal)
         if _looks_like_generic_request(title_norm):
             trailing = _extract_trailing_candidate(title_raw)
             if trailing:
@@ -278,4 +283,3 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     if len(informative) == 0 and not _has_strong_signal(toks):
         return {"status": "AMBIGUOUS", "reason": "uninformative"}
     return {"status": "OK", "reason": "title_candidate"}
-

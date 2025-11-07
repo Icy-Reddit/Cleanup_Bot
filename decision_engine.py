@@ -172,7 +172,10 @@ def decide(*, context, validator, title_report, poster_report, config=None):
 
         # 2) Duplicate / Repeated (title certain or poster CERTAIN)
         # same_author / different_author / unknown
-        if t_rel == "same_author" and (_is_title_certain(t_score, auto_t) or p_status == "CERTAIN"):
+        if t_rel == "same_author" and (
+            (t_type in ("exact", "normalized_exact") and _is_title_certain(t_score, auto_t))
+            or p_status == "CERTAIN"
+        ):
             return {
                 "action": "AUTO_REMOVE",
                 "category": "DUPLICATE",

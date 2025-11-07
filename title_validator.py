@@ -16,7 +16,7 @@ GENERIC_STOPWORDS: Set[str] = {
     "trying", "try", "find", "finding", "look", "looking", "search", "searching",
     "title", "name", "link", "links", "id", "identify", "identification",
     "this", "that", "it", "one", "what", "which",
-    "these", "those",  # <-- dodane, by nie zawyżały 'strong signals'
+    "these", "those",
     "drama", "show", "series", "movie", "short", "shorts", "micro", "episode", "episodes",
     "english", "eng", "subs", "subtitle", "subtitles",
     "douyin", "tiktok", "youtube", "yt", "bilibili", "xiaohongshu", "xhs",
@@ -35,7 +35,7 @@ SUSPECT_HINTS: Set[str] = {
 GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bneed\s+help\b", re.I),
     re.compile(r"\bhelp\s+me\b", re.I),
-    re.compile(r"\bhelp\b.*\bfind\w*\b", re.I),  # <-- rozszerzone (finde/finds/finding...)
+    re.compile(r"\bhelp\b.*\bfind\w*\b", re.I),  # find/finds/finding/finde...
     re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
     re.compile(r"\b(title|name)\b.*\blink\b", re.I),
     re.compile(r"\blooking\s+for\b", re.I),
@@ -56,11 +56,16 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bwhat\s+title\b", re.I),
     re.compile(r"\bwhat\s+is\s+the\s+title\b", re.I),
 
-    # Nietypowe frazy z wcześniejszego hotfixu
+    # Nietypowe frazy (poprzedni hotfix)
     re.compile(r"\bdo\s+anyone\s+know\s+where\s+to\s+find\b", re.I),
     re.compile(r"\bany(one|body)\s+know\s+where\s+(the\s+)?full\s+one\s+is\b", re.I),
     re.compile(r"\bany(one|body)\s+know\s+where\s+to\s+(watch|find)\b", re.I),
     re.compile(r"\bdoes\s+any(one|body)\s+have\s+a\s+link\b", re.I),
+
+    # --- NOWE: bardzo wąskie pod 'If some has the name in English or the link.' ---
+    re.compile(r"\bif\s+some(?:one)?\s+has\s+the\s+name\b", re.I),
+    re.compile(r"\bname\s+in\s+english\s+or\s+the\s+link\b", re.I),
+    re.compile(r"\b(has|have)\s+the\s+name\s+in\s+english\b", re.I),
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
@@ -288,3 +293,4 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     if len(informative) == 0 and not has_strong:
         return {"status": "AMBIGUOUS", "reason": "uninformative"}
     return {"status": "OK", "reason": "title_candidate"}
+

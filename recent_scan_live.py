@@ -727,7 +727,7 @@ def main() -> int:
                             if args._mark_checked_count < (args.mark_checked_max or 0):
                                 marker_text = args.mark_checked_text or "Titlematch: checked ✓"
                                 if not _already_marked_checked(post, marker_text.split("✓")[0].strip()):
-                                    post.mod.report(marker_text)
+                                    post.report(marker_text)
                                     args._mark_checked_count += 1
                                     print(f"[ACTION] Marked as checked ({args._mark_checked_count}/{args.mark_checked_max}): {marker_text}")
                                 else:

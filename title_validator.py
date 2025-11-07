@@ -16,6 +16,7 @@ GENERIC_STOPWORDS: Set[str] = {
     "trying", "try", "find", "finding", "look", "looking", "search", "searching",
     "title", "name", "link", "links", "id", "identify", "identification",
     "this", "that", "it", "one", "what", "which",
+    "these", "those",  # <-- dodane, by nie zawyżały 'strong signals'
     "drama", "show", "series", "movie", "short", "shorts", "micro", "episode", "episodes",
     "english", "eng", "subs", "subtitle", "subtitles",
     "douyin", "tiktok", "youtube", "yt", "bilibili", "xiaohongshu", "xhs",
@@ -34,7 +35,7 @@ SUSPECT_HINTS: Set[str] = {
 GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bneed\s+help\b", re.I),
     re.compile(r"\bhelp\s+me\b", re.I),
-    re.compile(r"\bhelp\b.*\bfind(ing)?\b", re.I),
+    re.compile(r"\bhelp\b.*\bfind\w*\b", re.I),  # <-- rozszerzone (finde/finds/finding...)
     re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
     re.compile(r"\b(title|name)\b.*\blink\b", re.I),
     re.compile(r"\blooking\s+for\b", re.I),
@@ -55,7 +56,7 @@ GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bwhat\s+title\b", re.I),
     re.compile(r"\bwhat\s+is\s+the\s+title\b", re.I),
 
-    # ---- Dodane (dla nietypowych fraz) ----
+    # Nietypowe frazy z wcześniejszego hotfixu
     re.compile(r"\bdo\s+anyone\s+know\s+where\s+to\s+find\b", re.I),
     re.compile(r"\bany(one|body)\s+know\s+where\s+(the\s+)?full\s+one\s+is\b", re.I),
     re.compile(r"\bany(one|body)\s+know\s+where\s+to\s+(watch|find)\b", re.I),
@@ -127,6 +128,10 @@ def _has_suspect_word(tokens: List[str]) -> bool:
     tl = [t.lower() for t in tokens]
     if any(t in SUSPECT_HINTS for t in tl):
         return True
+    # Dodatkowo: 'find*' (finde/finds/finding...) liczymy jako podejrzane
+    if any(re.fullmatch(r"find\w*", t) for t in tl):
+        return True
+    # Tolerancja literówek typu please/plz/pls/pleez itp.
     for t in tl:
         if re.fullmatch(r"(?:p?l?e?a?se|pls|plz|pleez|llease)", t):
             return True

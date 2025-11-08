@@ -92,6 +92,8 @@ def decide(
     title_report: Optional[Dict[str, Any]],
     poster_report: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,   # <— nowy, ignorowany
+    **_ignored,                                 # <— toleruj inne nadmiarowe pola
 ) -> Dict[str, Any]:
     """
     Główna funkcja Decison Engine.
@@ -220,4 +222,5 @@ def run_decision_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
         title_report=payload.get("title_report"),
         poster_report=payload.get("poster_report"),
         config=payload.get("config"),
+        context=payload.get("context"),   # <— dopisane
     )

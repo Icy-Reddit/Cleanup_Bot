@@ -12,18 +12,21 @@ from typing import Dict, List, Set
 
 # Słowa nie-niosące informacji (po normalizacji, lower-case)
 GENERIC_STOPWORDS: Set[str] = {
+    # ogólne prośby/słowa serwisowe
     "need", "needs", "help", "please", "pls", "plz", "anyone", "someone", "anybody",
     "trying", "try", "find", "finding", "look", "looking", "search", "searching",
     "title", "name", "link", "links", "id", "identify", "identification",
     "this", "that", "it", "one", "what", "which",
-    "these", "those",
+    # domenowe ogólniki
     "drama", "show", "series", "movie", "short", "shorts", "micro", "episode", "episodes",
     "english", "eng", "subs", "subtitle", "subtitles",
+    # platformy / ogólniki
     "douyin", "tiktok", "youtube", "yt", "bilibili", "xiaohongshu", "xhs",
+    # spójniki/zaimki itp.
     "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "with",
     "is", "are", "was", "were", "be", "been", "being",
     "my", "your", "their", "his", "her", "our",
-    "please,", "please.", "help.", "help,",
+    "please,", "please.", "help.", "help,",  # czasem po znakach
 }
 
 # Słowa „podejrzane” w ultra-krótkich tytułach
@@ -35,39 +38,35 @@ SUSPECT_HINTS: Set[str] = {
 GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\bneed\s+help\b", re.I),
     re.compile(r"\bhelp\s+me\b", re.I),
-    re.compile(r"\bhelp\b.*\bfind\w*\b", re.I),  # find/finds/finding/finde...
+    re.compile(r"\bhelp\b.*\bfind(ing)?\b", re.I),
     re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
     re.compile(r"\b(title|name)\b.*\blink\b", re.I),
     re.compile(r"\blooking\s+for\b", re.I),
     re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
     re.compile(r"\bdoes\s+anyone\s+know\s+(its|the)\s+name\b", re.I),
     re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
+    
+    # Zaktualizowane wzorce dla „looking for”:
+    re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),  # Puste zapytania: looking for title/link
 
-    re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),
-    re.compile(r"\blooking\s+for\s+this\s+drama\b", re.I),
-    re.compile(r"\bplease\s+help\b", re.I),
+    # --- NOWE wzorce: „where … watch/find” ---
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),   # where (can i) watch
+    re.compile(r"\bwhere\s+to\s+watch\b", re.I),              # where to watch
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),    # where (can i) find
 
-    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),
-    re.compile(r"\bwhere\s+to\s+watch\b", re.I),
-    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),
-
+    # --- nowe: "don't know the name/title" (również z apostrofem ’) ---
     re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\b(i\s+)?do\s+not\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\bunknown\s+(title|name)\b", re.I),
-
+    
+    # "what title ...", "what is the title ..."
     re.compile(r"\bwhat\s+title\b", re.I),
     re.compile(r"\bwhat\s+is\s+the\s+title\b", re.I),
 
-    # Nietypowe frazy (poprzedni hotfix)
-    re.compile(r"\bdo\s+anyone\s+know\s+where\s+to\s+find\b", re.I),
-    re.compile(r"\bany(one|body)\s+know\s+where\s+(the\s+)?full\s+one\s+is\b", re.I),
-    re.compile(r"\bany(one|body)\s+know\s+where\s+to\s+(watch|find)\b", re.I),
-    re.compile(r"\bdoes\s+any(one|body)\s+have\s+a\s+link\b", re.I),
+    # "don't know the title/name" (na wszelki wypadek)
+    re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
+    re.compile(r"\bunknown\s+(title|name)\b", re.I),
 
-    # --- NOWE: bardzo wąskie pod 'If some has the name in English or the link.' ---
-    re.compile(r"\bif\s+some(?:one)?\s+has\s+the\s+name\b", re.I),
-    re.compile(r"\bname\s+in\s+english\s+or\s+the\s+link\b", re.I),
-    re.compile(r"\b(has|have)\s+the\s+name\s+in\s+english\b", re.I),
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
@@ -100,11 +99,11 @@ def _informative_tokens(tokens: List[str]) -> List[str]:
 
 def _has_strong_signal(tokens: List[str]) -> bool:
     """
-    Silne sygnały:
-    - CJK,
-    - 4+ cyfry,
-    - litera+cyfra (np. s02e03, ep10),
-    - >=2 sensowne tokeny (>=4 znaki) po odcięciu stopwordów.
+    Silne sygnały, że tytuł niesie konkretną informację:
+    - znaki CJK (często prawdziwa nazwa),
+    - numer identyfikacyjny / rok / 4+ cyfry (np. 11735),
+    - mix liter i cyfr (np. s02e03, ep10),
+    - co najmniej 2 sensowne tokeny (>=4 znaki) po odcięciu stopwordów.
     """
     s = " ".join(tokens)
     if re.search(r"[\u4e00-\u9fff\u3040-\u30ff]", s):
@@ -135,10 +134,7 @@ def _has_suspect_word(tokens: List[str]) -> bool:
     tl = [t.lower() for t in tokens]
     if any(t in SUSPECT_HINTS for t in tl):
         return True
-    # Dodatkowo: 'find*' (finde/finds/finding...) liczymy jako podejrzane
-    if any(re.fullmatch(r"find\w*", t) for t in tl):
-        return True
-    # Tolerancja literówek typu please/plz/pls/pleez itp.
+    # "please" z literówkami: llease, pleez, pls, plz, itp.
     for t in tl:
         if re.fullmatch(r"(?:p?l?e?a?se|pls|plz|pleez|llease)", t):
             return True
@@ -150,172 +146,89 @@ def _looks_like_generic_request(s_norm: str) -> bool:
 # ----------------------------- Inquiry: generica -----------------------------
 
 def is_generic_inquiry(title: str) -> bool:
+    """
+    True, jeśli tytuł wygląda na „pustą prośbę” (help/title/link/looking for...),
+    a jednocześnie nie zawiera silnych sygnałów (np. 11735, CJK, litera+cyfra).
+    Używane wyłącznie dla flairów Inquiry.
+    """
     title_raw = (title or "").strip()
     if not title_raw:
-        return True
+        return True  # pusty = ewidentnie zły
+
     title_norm = _normalize_text(title_raw)
     toks = _tokens(title_norm)
+
+    # Jeżeli w ogóle nie ma tokenów po normalizacji, traktujemy jako puste
     if not toks:
         return True
+
+    # Jeśli są „silne sygnały”, nie kwalifikujemy jako 'generic inquiry'
     if _has_strong_signal(toks):
         return False
+
+    # Typowe puste wzorce (need help / help me / looking for / find title / title+link)
     if _looks_like_generic_request(title_norm):
         return True
+
+    # Ultra-krótkie tytuły zawierające słowa podejrzane (help/title/link/please/looking…)
     if _has_suspect_word(toks):
+        # brak silnych sygnałów + podejrzane słowo → generica
         return True
+
     return False
 
 # ----------------------------- Link Request: generica -----------------------------
 
 def _looks_like_generic_placeholder(title: str) -> bool:
     """
-    Wykrywa puste/ogólne tytuły. Wyjątki (NIE-generic): CJK / 4+ cyfry / s02e03 / ep12 / tytuł w cudzysłowie.
+    Wykrywa puste/ogólne tytuły typu: 'Does anyone know its name?', 'Please link', 'Need title', itp.
+    Zostawia wyjątki (CJK / 4+ cyfry / s02e03 / ep12 / tytuł w cudzysłowie), które sugerują konkretny trop.
     """
     if not title:
         return True
+
     t_raw = title.strip()
     t_norm = _normalize_text(t_raw)
     toks = _tokens(t_norm)
 
+    # ----- mocne wyjątki (NIE oznaczamy jako generic) -----
     if not toks:
         return True  # puste po normalizacji
     if _has_strong_signal(toks):
         return False
+    # tytuł w cudzysłowie (np. "Love Beyond Fate")
     if re.search(r"[\"“][^\"“]{3,}?[\"”]", t_raw):
         return False
 
+    # ----- klasyczne puste wzorce -----
     if _looks_like_generic_request(t_norm):
         return True
 
+    # bardzo mało treści informacyjnej (≤2 tokeny sensowne) + podejrzane słowa
     informative = _informative_tokens(toks)
     if len(informative) <= 2 and _has_suspect_word(toks):
         return True
 
     return False
 
-# ----------------------------- Fast-path helper -----------------------------
-
-_SPLIT_AFTER = re.compile(r"\s*[:;|\-–—\.]\s+")  # : ; | - – — .
-
-def _extract_trailing_candidate(title_raw: str) -> str | None:
-    """
-    Jeśli po separatorze (: ; - – — .) na końcu stoi fragment wyglądający na tytuł,
-    zwróć go. Kryteria (bardzo zachowawcze):
-      - 2..10 słów,
-      - >=1 'dłuższy' token (>=4 znaki) LUB token z myślnikiem w rdzeniu,
-      - nie same stopwordy po normalizacji.
-    """
-    if not title_raw:
-        return None
-    parts = _SPLIT_AFTER.split(title_raw, maxsplit=1)
-    if len(parts) < 2:
-        return None
-    tail = parts[-1].strip().strip('“”"')
-    if not tail:
-        return None
-    tail_norm = _normalize_text(tail)
-    toks = _tokens(tail_norm)
-    if not toks:
-        return None
-    word_cnt = len(toks)
-    if not (2 <= word_cnt <= 10):
-        return None
-    if all(_ltoken(t) in GENERIC_STOPWORDS for t in toks):
-        return None
-    if any(_token_is_hyphen_title(t) for t in toks) or any(len(t) >= 4 for t in toks):
-        return tail.strip()
-    return None
-
-# Kandydat po prefiksie generic (np. "Looking for <Title>")
-_GENERIC_PREFIX = re.compile(
-    r"^\s*(?:looking\s+for|help\s+me\s+find|please\s+help\s+me\s+find|any(?:one|body)\s+know(?:s)?\s+(?:the\s+)?name\s+of)\s+(?P<cand>.+?)\s*$",
-    re.I,
-)
-
-def _extract_candidate_after_generic_prefix(title_raw: str) -> str | None:
-    """
-    Szuka kandydata tytułu bez separatora, zaraz po frazie typu:
-      'Looking for <tytuł>' / 'Help me find <tytuł>' / 'Anyone know the name of <tytuł>'
-    Kryteria ostrożne: 2–10 tokenów, >=1 token długości ≥4, nie same stopwordy.
-    """
-    if not title_raw:
-        return None
-    m = _GENERIC_PREFIX.match(title_raw.strip())
-    if not m:
-        return None
-    cand = (m.group("cand") or "").strip().strip('“”"')
-    if not cand:
-        return None
-
-    # proste sito jakości
-    norm = _normalize_text(cand)
-    toks = _tokens(norm)
-    if not (2 <= len(toks) <= 10):
-        return None
-    if all(_ltoken(t) in GENERIC_STOPWORDS for t in toks):
-        return None
-    if not (any(len(t) >= 4 for t in toks) or any(_token_is_hyphen_title(t) for t in toks)):
-        return None
-
-    return cand
-    
-# Krótki hint w cudzysłowie (np. "Ke Chun") — traktuj jako wskazówkę, nie pełny tytuł
-_QUOTE_CONTENT = re.compile(r'[\"“]([^\"“]{2,80})[\"”]')
-
-def _extract_soft_quoted_hint(title_raw: str) -> str | None:
-    """
-    Szuka krótkiego fragmentu w cudzysłowie (1–3 słowa), np. nazwy aktora.
-    Jeśli znajdzie — zwraca hint; używane tylko, by złagodzić MISSING -> AMBIGUOUS.
-    """
-    if not title_raw:
-        return None
-    m = _QUOTE_CONTENT.search(title_raw)
-    if not m:
-        return None
-    cand = m.group(1).strip()
-    # sito jakości: 1–3 tokeny, bez samych stopwordów
-    norm = _normalize_text(cand)
-    toks = _tokens(norm)
-    if not (1 <= len(toks) <= 3):
-        return None
-    if all(_ltoken(t) in GENERIC_STOPWORDS for t in toks):
-        return None
-    return cand
-    
 # ----------------------------- Walidator główny -----------------------------
 
 def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str, str]:
     """
     Zwraca dict: {"status": "OK|AMBIGUOUS|MISSING", "reason": "<krótki_powód>"}.
-    Zasady:
-      - Link Request: priorytetem jest wyłapanie pustych/generic nagłówków,
-        ale nie ściągamy postów, gdy po separatorze stoi sensowny kandydat na tytuł.
+    Zmiany (kompromis dla krótkich tytułów):
+      - Jeśli wygląda jak prawdziwy tytuł (hyphen w rdzeniu albo TitleCase przy ≤3 słowach),
+        przepuszczamy jako OK.
+      - Jeśli tytuł jest bardzo krótki, ale „czysty” (bez podejrzanych słów) i ma ≥1 sensowny token (≥4 litery),
+        to AMBIGUOUS (trafi do MOD_QUEUE), nie MISSING.
+      - „Help/link/title/please…” nadal klasyfikują jako MISSING, o ile brak silnych sygnałów.
     """
     flair = (flair or "").strip()
     title_raw = (title or "").strip()
 
-    # 📌 Link Request → najpierw odsień „puste/generic” tytuły (fast-path + wyjątek na trailing tytuł)
+    # 📌 Link Request → najpierw odsień „puste/generic” tytuły
     if flair == "📌 Link Request":
         if _looks_like_generic_placeholder(title_raw):
-            trailing = _extract_trailing_candidate(title_raw)
-            if trailing:
-                # „generic prefix + potencjalny tytuł” → nie karzemy jako MISSING.
-                # Zostawiamy do weryfikacji — matcher może jeszcze złapać REPEATED.
-                return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
-                
-            # NOWE: kandydat bez separatora po prefiksie generic (np. "Looking for The fierce bride’s second chance")
-            prefixed = _extract_candidate_after_generic_prefix(title_raw)
-            if prefixed:
-                return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
-                
-            # NOWE: króciutki hint w cudzysłowie (np. "Ke Chun") → nie usuwaj, daj do modqueue
-            soft_quoted = _extract_soft_quoted_hint(title_raw)
-            if soft_quoted:
-                return {"status": "AMBIGUOUS", "reason": "quoted_hint"}
-
-        return {"status": "MISSING", "reason": "generic_placeholder"}
-    
-                
             return {"status": "MISSING", "reason": "generic_placeholder"}
 
     # Puste pozycje łapiemy zawsze
@@ -332,10 +245,6 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     # Sztywne „puste prośby” dla ścisłych flairów, jeśli brak silnych sygnałów
     if flair in STRICT_FLAIRS:
         if _looks_like_generic_request(title_norm) and not _has_strong_signal(toks):
-            # Jeśli ktoś napisał generica, ale po separatorze widać kandydata — też nie MISSING
-            trailing = _extract_trailing_candidate(title_raw)
-            if trailing:
-                return {"status": "AMBIGUOUS", "reason": "generic_prefix_with_candidate"}
             return {"status": "MISSING", "reason": "generic_title"}
 
     # Heurystyki ratunkowe dla krótkich tytułów
@@ -348,20 +257,23 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
 
     if flair in STRICT_FLAIRS:
         # 1) Wygląda jak tytuł → OK
+        #    - token z myślnikiem (stand-in)
+        #    - ≤3 słowa, ≥1 sensowny token (≥4 litery) i >=50% TitleCase
         if has_hyphen_title or (words_cnt <= 3 and len(long_informative) >= 1 and titlecase_ratio >= 0.5):
             return {"status": "OK", "reason": "looks_like_title"}
 
-        # 2) Krótkie, ale czyste → AMBIGUOUS (do MOD_QUEUE)
+        # 2) Krótkie, ale czyste → AMBIGUOUS (do MOD_QUEUE), o ile brak podejrzanych słów
         if not has_strong and len(informative) < 2:
             if not has_suspect and len(long_informative) >= 1:
                 return {"status": "AMBIGUOUS", "reason": "short_but_clean"}
-            # 3) „Pusty” → MISSING
+            # 3) Jeśli nadal brak mocnych sygnałów i tytuł jest „pusty” → MISSING
             return {"status": "MISSING", "reason": "generic_title"}
 
-        # 4) W pozostałych przypadkach — OK
+        # 4) W pozostałych przypadkach — OK (bo mamy już dość sygnałów)
         return {"status": "OK", "reason": "title_candidate"}
 
-    # Inquiry i inne — łagodniej
-    if len(informative) == 0 and not has_strong:
-        return {"status": "AMBIGUOUS", "reason": "uninformative"}
-    return {"status": "OK", "reason": "title_candidate"}
+    else:
+        # Łagodniejsze zasady dla innych flairów (np. Inquiry)
+        if len(informative) == 0 and not has_strong:
+            return {"status": "AMBIGUOUS", "reason": "uninformative"}
+        return {"status": "OK", "reason": "title_candidate"}

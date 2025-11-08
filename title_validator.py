@@ -35,38 +35,41 @@ SUSPECT_HINTS: Set[str] = {
 }
 
 # Wyrażenia typu „pusta prośba” – jeśli pasuje i brak innych sygnałów → MISSING
-GENERIC_TITLE_PATTERNS: List[re.Pattern] = [
+GENERIC_TITLE_PATTERNS = [
+    # --- prośby ogólne / help ---
     re.compile(r"\bneed\s+help\b", re.I),
     re.compile(r"\bhelp\s+me\b", re.I),
     re.compile(r"\bhelp\b.*\bfind(ing)?\b", re.I),
-    re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
-    re.compile(r"\b(title|name)\b.*\blink\b", re.I),
-    re.compile(r"\blooking\s+for\b", re.I),
     re.compile(r"\bany(one|body)\b.*\bknow\b", re.I),
     re.compile(r"\bdoes\s+anyone\s+know\s+(its|the)\s+name\b", re.I),
     re.compile(r"\banyone\s+know\s+(the\s+)?name\b", re.I),
-    
-    # Zaktualizowane wzorce dla „looking for”:
-    re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),  # Puste zapytania: looking for title/link
 
-    # --- NOWE wzorce: „where … watch/find” ---
-    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),   # where (can i) watch
-    re.compile(r"\bwhere\s+to\s+watch\b", re.I),              # where to watch
-    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),    # where (can i) find
+    # --- „looking for …” / „find … title/link” ---
+    re.compile(r"\blooking\s+for\b", re.I),
+    re.compile(r"\blooking\s+for\s+(title|link)\b", re.I),
+    re.compile(r"\bfind(ing)?\b.*\btitle\b", re.I),
 
-    # --- nowe: "don't know the name/title" (również z apostrofem ’) ---
+    # --- „where … watch/find” ---
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?watch\b", re.I),
+    re.compile(r"\bwhere\s+to\s+watch\b", re.I),
+    re.compile(r"\bwhere\s+(can\s+)?(i\s+)?find\b", re.I),
+
+    # --- „don’t know / unknown title/name” (różne apostrofy) ---
     re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\b(i\s+)?do\s+not\s+know\s+(the\s+)?(title|name)\b", re.I),
     re.compile(r"\bunknown\s+(title|name)\b", re.I),
-    
-    # "what title ...", "what is the title ..."
+
+    # --- „what title …” ---
     re.compile(r"\bwhat\s+title\b", re.I),
     re.compile(r"\bwhat\s+is\s+the\s+title\b", re.I),
 
-    # "don't know the title/name" (na wszelki wypadek)
-    re.compile(r"\b(i\s+)?do(?:n'?|’)?t\s+know\s+(the\s+)?(title|name)\b", re.I),
-    re.compile(r"\bunknown\s+(title|name)\b", re.I),
-
+    # --- „no title …” / prośby o tytuł/link ---
+    re.compile(r"\bno\s+title\b", re.I),
+    re.compile(r"\bno\s+title\s+in\s+(video|poster|image|clip)\b", re.I),
+    re.compile(r"\btitle\s+please\b", re.I),
+    re.compile(r"\b(video\s+)?link\s+please\b", re.I),
+    re.compile(r"\b(title|link)\s+(pls|plz|please)\b", re.I),
+    re.compile(r"\b(please\s+)?(share|give|send)\s+(the\s+)?(title|link)\b", re.I),
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
@@ -142,6 +145,16 @@ def _has_suspect_word(tokens: List[str]) -> bool:
 
 def _looks_like_generic_request(s_norm: str) -> bool:
     return any(p.search(s_norm) for p in GENERIC_TITLE_PATTERNS)
+
+SUSPECT_CORE = {"title","link","video","name","help","please","pls","plz","anyone","anybody","know","share","find","finding","where"}
+
+def _mostly_suspect(tokens: list[str]) -> bool:
+    tl = [t.lower() for t in tokens]
+    if not tl:
+        return False
+    sus = sum(1 for t in tl if t in SUSPECT_CORE)
+    # „krótki” nagłówek (≤6 słów) i przynajmniej 2-3 „podejrzane” słowa → MISSING
+    return (len(tl) <= 6 and sus >= 2)
 
 # ----------------------------- Inquiry: generica -----------------------------
 
@@ -241,6 +254,19 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
         return {"status": "MISSING", "reason": "empty_after_norm"}
 
     informative = _informative_tokens(toks)
+
+    # --- Bezpiecznik kontekstowy dla fraz-generyków ---
+    has_generic_phrase = any(p.search(title_norm) for p in GENERIC_TITLE_PATTERNS)
+
+    if has_generic_phrase:
+        content = _content_tokens(_tokens((title or "").strip()))
+        # Jeśli nagłówek jest dłuższy (więcej niż 6 słów) i
+        # widać co najmniej 2 sensowne tokeny LUB jest ewidentne nazwisko,
+        # nie traktuj jako MISSING – zdegraduj do AMBIGUOUS (modqueue).
+        if len(toks) > 6 and (len(content) >= 2 or _has_proper_name(_tokens(title))):
+            return {"status": "AMBIGUOUS", "reason": "generic_with_context"}
+        # W przeciwnym razie klasyczny MISSING
+        return {"status": "MISSING", "reason": "generic_placeholder"}
 
     # Sztywne „puste prośby” dla ścisłych flairów, jeśli brak silnych sygnałów
     if flair in STRICT_FLAIRS:

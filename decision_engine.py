@@ -172,21 +172,29 @@ def decide(*, context, validator, title_report, poster_report, config=None):
 
         # 2) Duplicate / Repeated (title certain or poster CERTAIN)
         # same_author / different_author / unknown
-        if t_rel == "same_author" and (
-            (t_type in ("exact", "normalized_exact") and _is_title_certain(t_score, auto_t))
-            or p_status == "CERTAIN"
-        ):
-            return {
-                "action": "AUTO_REMOVE",
-                "category": "DUPLICATE",
-                "reason": "Duplicate: same author and either title match is certain or poster is CERTAIN.",
-                "removal_reason": "Duplicate Post",
-                "removal_comment": None,
-                "evidence": {
-                    "title_match": t_evd,
-                    "poster_match": p_evd,
-                },
-                "links": _links_from_title(title_report),
+        if t_rel == "same_author":
+            if (t_type in ("exact", "normalized_exact") and _is_title_certain(t_score, auto_t)) or p_status == "CERTAIN":
+                return {
+                    "action": "AUTO_REMOVE",
+                    "category": "DUPLICATE",
+                    "reason": "Duplicate: same author and either title match is certain or poster is CERTAIN.",
+                    "removal_reason": "Duplicate Post",
+                    "removal_comment": None,
+                    "evidence": {"title_match": t_evd, "poster_match": p_evd},
+                    "links": _links_from_title(title_report),
+               }
+           else:
+               # NIE usuwamy w ciemno przy fuzzy-100 itp. – daj do przeglądu
+               return {
+                   "action": "AUTO_REMOVE",
+                   "category": "DUPLICATE",
+                   "reason": "Duplicate: same author and either title match is certain or poster is CERTAIN.",
+                   "removal_reason": "Duplicate Post",
+                   "removal_comment": None,
+                   "evidence": {"title_match": t_evd, "poster_match": p_evd},
+                   "links": _links_from_title(title_report),
+                  
+               }
             }
 
         if t_rel == "different_author" and (t_type in ("exact", "normalized_exact") or p_status == "CERTAIN"):

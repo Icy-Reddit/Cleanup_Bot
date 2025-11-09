@@ -649,7 +649,7 @@ def main() -> int:
             tmatch = {"best": None, "pool_ids": [], "top": [], "skipped": "approved_title"}
             if args.live:
                 print("[TM] skipped: approved title")  
-        else
+        else:
             tmatch = run_title_matcher(post, cfg)
                 
         if args.live:

@@ -43,4 +43,8 @@ matcher:
     - love beyond fate
     # dopisuj kolejne frazy lowercase, porównywane jako substring
 
+matcher:
+  allow_authors:
+    - SayuriKishi
+
 

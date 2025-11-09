@@ -19,6 +19,10 @@ phrases:
     - "again"
     - "previous request"
 
+matcher:
+  excluded_titles:
+    - love beyond fate
+    
 comments:
   repeated_request_template: >
     This link was already requested, you may have overlooked it. Please scroll in link requests or try keywords or title in the search bar. You may get lucky and it’s already found — or you click follow when you find the earlier post and we’re all fine.
@@ -37,4 +41,5 @@ poster:
 runtime:
   state_file: cache/state.json
   state_ttl_min: 180
+
 

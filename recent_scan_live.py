@@ -648,10 +648,9 @@ def main() -> int:
             # miękkie pominięcie matchera: nie liczymy dopasowania tytułu
             tmatch = {"best": None, "pool_ids": [], "top": [], "skipped": "approved_title"}
             if args.live:
-                print("[TM] skipped: approved title")
-                
-            else
-                tmatch = run_title_matcher(post, cfg)
+                print("[TM] skipped: approved title")  
+        else
+            tmatch = run_title_matcher(post, cfg)
                 
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)

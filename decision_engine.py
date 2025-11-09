@@ -169,7 +169,31 @@ def decide(*, context, validator, title_report, poster_report, config=None):
 
         p_evd = _evidence_poster(poster_report)
         p_status = p_evd.get("status") or "NONE"  # CERTAIN|UNSURE|NONE|NO_IMAGE
+        
+         # --- Allowlist autora dopasowania tytułu (ignorujemy dopasowania od wskazanych autorów)
+        try:
+            cfg_allow = ((config or {}).get("matcher", {}) or {}).get("allow_authors", []) or []
+            allow_authors = {str(a).strip().lower() for a in cfg_allow}
+        except Exception:
+            allow_authors = set()
 
+        cand_author = (t_evd.get("candidate", {}) or {}).get("author") or ""
+        # cand_author ma format "u/Name" -> zdejmij prefiks, znormalizuj:
+        cand_author_norm = cand_author.lstrip("u/").strip().lower()
+
+        if cand_author_norm and cand_author_norm in allow_authors:
+            # Zneutralizuj sygnał tytułu: traktuj jak brak silnego dopasowania
+            t_score = 0
+            t_type = "none"
+            t_rel = "unknown"
+            # i zaktualizuj t_evd, żeby ładnie pokazało się w logach
+            t_evd = {
+                **t_evd,
+                "score": 0,
+                "type": "none",
+                "relation": "unknown",
+            }
+        
         # 2) Duplicate / Repeated (title certain or poster CERTAIN)
         # same_author / different_author / unknown
         if t_rel == "same_author" and (_is_title_certain(t_score, auto_t) or p_status == "CERTAIN"):

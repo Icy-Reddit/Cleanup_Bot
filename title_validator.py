@@ -263,7 +263,7 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
         # Jeśli nagłówek jest dłuższy (więcej niż 6 słów) i
         # widać co najmniej 2 sensowne tokeny LUB jest ewidentne nazwisko,
         # nie traktuj jako MISSING – zdegraduj do AMBIGUOUS (modqueue).
-        if len(toks) > 6 and (len(content) >= 2 or _has_proper_name(_tokens(title))):
+        if len(toks) > 6 and (len(content) >= 1 or _has_proper_name(_tokens(title))):
             return {"status": "AMBIGUOUS", "reason": "generic_with_context"}
         # W przeciwnym razie klasyczny MISSING
         return {"status": "MISSING", "reason": "generic_placeholder"}

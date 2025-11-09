@@ -496,6 +496,9 @@ def main() -> int:
 
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
+            
+        # [ADD] bezpieczna inicjalizacja tmatch (fallback)
+        tmatch = {"best": None, "pool_ids": [], "top": []}
 
         # ---------- Flair routing ----------
         # Skip everything outside Link Request / Inquiry
@@ -649,7 +652,8 @@ def main() -> int:
             if args.live:
                 print("[TM] skipped: excluded title pattern")
             else:
-                tmatch = run_title_matcher(post, cfg)
+                {"best": None, "pool_ids": [], "top": [], "skipped": "excluded_title"} \
+                if "love beyond fate" in (title or "").lower() else run_title_matcher(post, cfg)
             if args.live:
                 t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
                 print(f"[TM] best score={score} certainty={cert} rel={rel}")

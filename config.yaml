@@ -38,5 +38,9 @@ runtime:
   state_file: cache/state.json
   state_ttl_min: 180
 
+matcher:
+  approved_titles:
+    - love beyond fate
+    # dopisuj kolejne frazy lowercase, porównywane jako substring
 
 

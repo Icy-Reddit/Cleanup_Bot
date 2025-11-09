@@ -443,6 +443,11 @@ def main() -> int:
 
     try:
         cfg = load_config(args.config)
+        excluded_titles = set(
+            t.strip().lower()
+            for t in (cfg.get("matcher", {}).get("excluded_titles", []) or [])
+            if isinstance(t, str) and t.strip()
+        )
     except Exception as e:
         print(f"[FATAL] Cannot load config: {e}", file=sys.stderr)
         return 2
@@ -640,12 +645,19 @@ def main() -> int:
         if args.live:
             print_validator(validator)
 
-        tmatch = run_title_matcher(post, cfg)
-        if args.live:
-            t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
-            print(f"[TM] best score={score} certainty={cert} rel={rel}")
-            if t_title != "(unknown)":
-                print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
+        # Skip matchera dla wykluczonych tytułów (np. "love beyond fate")
+        title_lc = (title or "").strip().lower()
+        if any(x in title_lc for x in excluded_titles):
+            if args.live:
+                print("[TM] skipped (excluded title pattern)")
+            tmatch = {"best": None, "pool_ids": [], "top": [], "skipped": "excluded_title"}
+        else:
+            tmatch = run_title_matcher(post, cfg)
+            if args.live:
+                t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
+                print(f"[TM] best score={score} certainty={cert} rel={rel}")
+                if t_title != "(unknown)":
+                    print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
         # Poster disabled stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}

@@ -60,8 +60,6 @@ try:
 except Exception:
     decision_engine = None
 
-# --- Soft exclude for ad-glitch titles (matcher skip only) ---
-EXCLUDED_MATCH_TITLES = {"love beyond fate"}  # lower-case substrings
 
 # ------------------------ Utils ------------------------
 
@@ -496,9 +494,6 @@ def main() -> int:
 
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
-            
-        # [ADD] bezpieczna inicjalizacja tmatch (fallback)
-        tmatch = {"best": None, "pool_ids": [], "top": []}
 
         # ---------- Flair routing ----------
         # Skip everything outside Link Request / Inquiry
@@ -644,21 +639,13 @@ def main() -> int:
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
-        
-        # SKIP matcher for known ad-glitch titles (soft exclude; everything else unchanged)
-        title_lc = (title or "").strip().lower()
-        if any(x in title_lc for x in EXCLUDED_MATCH_TITLES):
-            tmatch = {"best": None, "pool_ids": [], "top": [], "skipped": "excluded_title"}
-            if args.live:
-                print("[TM] skipped: excluded title pattern")
-            else:
-                {"best": None, "pool_ids": [], "top": [], "skipped": "excluded_title"} \
-                if "love beyond fate" in (title or "").lower() else run_title_matcher(post, cfg)
-            if args.live:
-                t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
-                print(f"[TM] best score={score} certainty={cert} rel={rel}")
-                if t_title != "(unknown)":
-                    print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
+
+        tmatch = run_title_matcher(post, cfg)
+        if args.live:
+            t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
+            print(f"[TM] best score={score} certainty={cert} rel={rel}")
+            if t_title != "(unknown)":
+                print(f"     -> {t_title} | {flair_from_rep(tmatch)} | {link or '(no link)'}")
 
         # Poster disabled stub
         poster_rep = {"status": "NO_REPORT", "distance": None, "relation": "unknown"}

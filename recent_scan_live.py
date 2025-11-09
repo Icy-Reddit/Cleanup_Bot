@@ -443,6 +443,9 @@ def main() -> int:
 
     try:
         cfg = load_config(args.config)
+        approved_titles = set(map(str.strip, map(str.lower,
+            ((cfg.get("matcher") or {}).get("approved_titles") or [])
+        )))
     except Exception as e:
         print(f"[FATAL] Cannot load config: {e}", file=sys.stderr)
         return 2
@@ -639,8 +642,17 @@ def main() -> int:
         validator = run_title_validator(title, flair, cfg)
         if args.live:
             print_validator(validator)
-
-        tmatch = run_title_matcher(post, cfg)
+            
+        title_lc = (title or "").lower()
+        if any(pat and pat in title_lc for pat in approved_titles):
+            # miękkie pominięcie matchera: nie liczymy dopasowania tytułu
+            tmatch = {"best": None, "pool_ids": [], "top": [], "skipped": "approved_title"}
+            if args.live:
+                print("[TM] skipped: approved title")
+                
+            else
+                tmatch = run_title_matcher(post, cfg)
+                
         if args.live:
             t_title, score, cert, rel, link = summarize_title_matcher(tmatch)
             print(f"[TM] best score={score} certainty={cert} rel={rel}")

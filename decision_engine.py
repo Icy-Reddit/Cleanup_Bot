@@ -170,7 +170,39 @@ def decide(*, context, validator, title_report, poster_report, config=None):
         p_evd = _evidence_poster(poster_report)
         p_status = p_evd.get("status") or "NONE"  # CERTAIN|UNSURE|NONE|NO_IMAGE
         
-         # --- Allowlist autora dopasowania tytułu (ignorujemy dopasowania od wskazanych autorów)
+        # --- Allowlist tytułów bieżącego posta (twarde NO_ACTION dla 📌 Link Request)
+        try:
+            cfg_titles = ((config or {}).get("matcher", {}) or {}).get("approved_titles", []) or []
+            approved_titles = {str(t).strip().lower() for t in cfg_titles if str(t).strip()}
+        except Exception:
+            approved_titles = set()
+
+        flair = (context or {}).get("flair") or ""
+        raw_title = (context or {}).get("title") or ""
+        # normalizacja: lowercase + NBSP→spacja + usunięcie ZWSP + zbicie wielospacji
+        norm_title = " ".join(
+            str(raw_title).lower()
+            .replace("\u00a0", " ")
+            .replace("\u200b", "")
+            .split()
+        )
+
+        if flair == "📌 Link Request" and approved_titles and any(needle in norm_title for needle in approved_titles):
+           # twarde NO_ACTION – omijamy ścieżki DUPLICATE/REPEATED
+            return {
+                "action": "NO_ACTION",
+                "category": "NO_SIGNAL",
+                "reason": "approved_title_allowlist",
+                "removal_reason": None,
+                "removal_comment": None,
+                "evidence": {
+                    "title_match": _evidence_title(title_report),
+                    "poster_match": p_evd,
+                },
+                "links": _links_from_title(title_report),
+            }
+         
+        # --- Allowlist autora dopasowania tytułu (ignorujemy dopasowania od wskazanych autorów)
         try:
             cfg_allow = ((config or {}).get("matcher", {}) or {}).get("allow_authors", []) or []
             allow_authors = {str(a).strip().lower() for a in cfg_allow}

@@ -188,7 +188,7 @@ def decide(*, context, validator, title_report, poster_report, config=None):
         )
 
         if flair == "📌 Link Request" and approved_titles and any(needle in norm_title for needle in approved_titles):
-           # twarde NO_ACTION – omijamy ścieżki DUPLICATE/REPEATED
+            # twarde NO_ACTION – omijamy ścieżki DUPLICATE/REPEATED
             return {
                 "action": "NO_ACTION",
                 "category": "NO_SIGNAL",

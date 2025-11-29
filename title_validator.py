@@ -175,6 +175,27 @@ def is_generic_inquiry(title: str) -> bool:
     if not toks:
         return True
 
+    # Jeśli w tytule jest coś, co wygląda na imię/nazwisko aktora lub nazwę dramy,
+    # nie traktujemy tego jako generic inquiry (np. "Liu Xiao Xu", "Zhao Lusi").
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z']+", title_raw)
+    name_like: List[str] = []
+    for t in raw_tokens:
+        lower = t.lower()
+        # odrzucamy typowe śmieciowe słowa i podejrzane hinty
+        if lower in GENERIC_STOPWORDS:
+            continue
+        if lower in SUSPECT_HINTS:
+            continue
+        if lower in {"title", "drama", "series"}:
+            continue
+        # szukamy raczej nazw: min. 3 znaki, zaczyna się wielką literą
+        if len(t) >= 3 and t[0].isupper():
+            name_like.append(t)
+
+    if name_like:
+        # jest przynajmniej jedno "imię/nazwisko"/nazwa — nie klasyfikujemy jako generic
+        return False
+        
     # Jeśli są „silne sygnały”, nie kwalifikujemy jako 'generic inquiry'
     if _has_strong_signal(toks):
         return False

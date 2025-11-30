@@ -495,6 +495,13 @@ def main() -> int:
         preview = (selftext or "")[:160].replace("\n", " ").strip()
         flair = getattr(post, "link_flair_text", None) or ""
 
+        approved_by = getattr(post, "approved_by", None)
+        approved = getattr(post, "approved", None)
+        if approved_by is not None or approved:
+            if args.live or args.verbose:
+                print(f"[SKIP] flair={flair or '(none)'} | reason=already approved by moderator")
+            continue
+
         if args.live:
             print_human_post(source, post, body_preview=preview or None)
 

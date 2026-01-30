@@ -260,7 +260,7 @@ def decide(*, context, validator, title_report, poster_report, config=None):
         # 3) Borderline title without poster confirmation → Mod Queue
         if _is_title_border(t_score, auto_t, border_t) and p_status in ("NONE", "NO_IMAGE", "UNSURE", "NO_REPORT"):
             return {
-                "action": "MOD_QUEUE",
+                "action": "NO_ACTION",
                 "category": "AMBIGUOUS",
                 "reason": f"Borderline title score ({t_score}) without poster confirmation.",
                 "removal_reason": None,

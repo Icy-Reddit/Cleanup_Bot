@@ -472,8 +472,8 @@ def main() -> int:
         ensure_dir(csv_path)
 
     # Flair policy sets
-    FLAIR_LINK_REQUEST = {"📌 Link Request", "Drama ID"}
-    FLAIR_SKIP = {"🔗 Found & Shared", "✅ Request Complete", "Archived"}
+    FLAIR_LINK_REQUEST = {"📌 Link Request", "📌 Drama ID"}
+    FLAIR_SKIP = {"🔗 Found & Shared", "✅ Request Complete", "✅ Archived"}
     FLAIR_INQUIRY = {"🎭 Actor Inquiry", "🔍 Inquiry"}
 
     for source, post in posts:

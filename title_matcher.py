@@ -48,8 +48,10 @@ _DEFAULTS = {
 
 FLAIRS_DEFAULT = [
     "📌 Link Request",
+    "📌 Drama ID",
     "🔗 Found & Shared",
     "✅ Request Complete",
+    "✅ Archived"
 ]
 
 def _get(cfg: Optional[dict], path: str, default: Any) -> Any:

@@ -73,7 +73,7 @@ GENERIC_TITLE_PATTERNS = [
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
-STRICT_FLAIRS = {"📌 Link Request"}
+STRICT_FLAIRS = {"📌 Link Request", "📌 Drama ID"}
 
 # ----------------------------- Normalizacja / tokeny -----------------------------
 
@@ -261,7 +261,7 @@ def validate_title(title: str, flair: str = "", config: Dict = None) -> Dict[str
     title_raw = (title or "").strip()
 
     # 📌 Link Request → najpierw odsień „puste/generic” tytuły
-    if flair == "📌 Link Request":
+    if flair in STRICT_FLAIRS:
         if _looks_like_generic_placeholder(title_raw):
             return {"status": "MISSING", "reason": "generic_placeholder"}
 

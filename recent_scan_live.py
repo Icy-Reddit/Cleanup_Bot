@@ -3,7 +3,7 @@
 #
 # - Scans last N minutes from /new + modqueue (Submissions only)
 # - Flair policy:
-#     📌 Link Request      → full analysis (validator, matcher, decision engine)
+#     📌 Link Request/🔍 Inquiry/ 📌 Drama ID     → full analysis (validator, matcher, decision engine)
 #     🔗 Found & Shared    → skipped
 #     ✅ Request Complete  → skipped
 #     🎭 Actor Inquiry / 🔍 Inquiry → title validation only (no matcher/DE)
@@ -378,7 +378,7 @@ def print_decision(dec: Dict[str, Any], title_rep: Dict[str, Any], poster_rep: O
 
 # Default mapping when DE doesn't provide removal_reason title.
 REASON_TITLE_MAP = {
-    "REPEATED": "Repeated Request",             # (opcjonalnie: "Unsolved Request")
+    "REPEATED": "Duplicate Post",             # (opcjonalnie: "Unsolved Request")
     "DUPLICATE": "Duplicate Post",
     "MISSING": "Lack of Drama Name or Description in Title",
 }

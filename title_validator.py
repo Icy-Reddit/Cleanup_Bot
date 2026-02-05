@@ -73,7 +73,7 @@ GENERIC_TITLE_PATTERNS = [
 ]
 
 # Flairy, dla których wymagamy faktycznej nazwy/opisu (pełna surowość)
-STRICT_FLAIRS = {"📌 Link Request", "📌 Drama ID"}
+STRICT_FLAIRS = {"📌 Link Request", "📌 Drama ID", "🔍 Inquiry"}
 
 # ----------------------------- Normalizacja / tokeny -----------------------------
 

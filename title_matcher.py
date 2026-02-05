@@ -49,6 +49,7 @@ _DEFAULTS = {
 FLAIRS_DEFAULT = [
     "📌 Link Request",
     "📌 Drama ID",
+    "🔍 Inquiry"
     "🔗 Found & Shared",
     "✅ Request Complete",
     "✅ Archived"

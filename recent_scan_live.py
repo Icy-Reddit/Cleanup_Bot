@@ -472,9 +472,9 @@ def main() -> int:
         ensure_dir(csv_path)
 
     # Flair policy sets
-    FLAIR_LINK_REQUEST = {"📌 Link Request", "📌 Drama ID"}
+    FLAIR_LINK_REQUEST = {"📌 Link Request", "📌 Drama ID", "🔍 Inquiry"}
     FLAIR_SKIP = {"🔗 Found & Shared", "✅ Request Complete", "✅ Archived"}
-    FLAIR_INQUIRY = {"🎭 Actor Inquiry", "🔍 Inquiry"}
+    FLAIR_INQUIRY = {"🎭 Actor Inquiry"}
 
     for source, post in posts:
         pid = getattr(post, "id", None)
@@ -671,6 +671,8 @@ def main() -> int:
         context = {
             "author": getattr(getattr(post, "author", None), "name", None),
             "flair_in": flair,
+            "flair": flair,
+            "title": title,
             "post_id": pid,
             "url": getattr(post, "permalink", None),
             "source": source,
@@ -712,7 +714,7 @@ def main() -> int:
                             msg = "This request was already posted recently. Please use the search bar before posting."
                         elif reason_title == "Duplicate Post":
                             msg = "Duplicate posts are not allowed."
-                        elif reason_title == "Lack of title or description":
+                        elif reason_title == "Lack of Drama Name or Description in Title":
                             msg = "Your title must include the drama’s name or a concrete description. Please repost with a specific title."
                         else:
                             msg = "Post removed per subreddit rules."

@@ -410,6 +410,16 @@ def _already_marked_checked(post, marker_text: str) -> bool:
             return True
 
     return False
+    
+def _norm_flair(s: str) -> str:
+    s = (s or "").replace("\u00a0", " ").replace("\u200b", "").replace("\ufe0f", "")
+    s = " ".join(s.split())
+    aliases = {
+        "📌Drama ID": "📌 Drama ID",
+        "🔍Inquiry": "🔍 Inquiry",
+        "🎭Actor Inquiry": "🎭 Actor Inquiry",
+    }
+    return aliases.get(s, s)
 
 # ------------------------ Main ------------------------
 
@@ -493,7 +503,8 @@ def main() -> int:
         title = getattr(post, "title", "") or ""
         selftext = getattr(post, "selftext", "") or ""
         preview = (selftext or "")[:160].replace("\n", " ").strip()
-        flair = getattr(post, "link_flair_text", None) or ""
+        flair_raw = getattr(post, "link_flair_text", None) or ""
+        flair = _norm_flair(flair_raw)
 
         approved_by = getattr(post, "approved_by", None)
         approved = getattr(post, "approved", None)

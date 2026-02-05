@@ -56,10 +56,8 @@ _DEFAULTS = {
             "https://www.reddit.com/r/CShortDramas/comments/1ig6a8j/how_to_use_the_search_bar_in_our_subreddit/"
         ),
         "missing_title_template": (
-            "Your post has been removed because it doesn't include the drama name or a short description in the header. This is required to keep the subreddit organized and help others find and fulfill similar requests.\n"
-            "If the name is visible on the poster, just add it to the header.\n"
-            "If there’s no name, please add a short description instead. Think of what caught your attention, add the genre, storyline, actor’s name, or a brief summary of what you saw in the ad.\n"
-            "Why do we ask this? Because search terms like “link” or “Do you know the title?” aren’t helpful for others looking for the same drama."
+            "We can’t process this inquiry because it lacks a usable drama name or description.\n"
+            "If your request includes a poster or screenshot that already shows an app/platform name, please do not repost it.\n"
         ),
     },
 }
